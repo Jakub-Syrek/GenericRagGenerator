@@ -558,7 +558,7 @@ class RagService:
         @param kinds          Optional list of kinds.
         @returns Composite filter or `None` when no scoping is requested.
         """
-        clauses: list[MetadataFilter] = []
+        clauses: list[MetadataFilter | MetadataFilters] = []
         if document_ids:
             clauses.append(self._scalar_or_in("doc_id", document_ids))
         if repository_ids:
@@ -884,7 +884,7 @@ class RagService:
         @returns Ranked list of `NodeWithScore`.
         @raises EmbeddingError On retrieval failures.
         """
-        clauses: list[MetadataFilter] = []
+        clauses: list[MetadataFilter | MetadataFilters] = []
         if document_ids:
             clauses.append(self._scalar_or_in("doc_id", document_ids))
         if repository_ids:
