@@ -18,13 +18,30 @@
         <h2>Documents</h2>
         <form id="upload-form" class="upload">
           <label class="upload__label" for="file-input">
-            Drop a PDF / TXT / Markdown file
+            PDF, TXT, Markdown, HTML, DOCX or a source file
           </label>
-          <input id="file-input" type="file" accept=".pdf,.txt,.md,.markdown" />
+          <input
+            id="file-input"
+            type="file"
+            accept=".pdf,.txt,.md,.markdown,.rst,.html,.htm,.docx,.py,.js,.mjs,.ts,.tsx,.jsx,.java,.kt,.go,.rs,.c,.h,.cpp,.hpp,.cs,.rb,.php,.swift,.sh,.ps1,.sql,.yaml,.yml,.toml,.json,.xml"
+          />
           <button id="upload-btn" type="submit">Upload &amp; index</button>
           <p id="upload-status" class="status" role="status"></p>
         </form>
         <ul id="document-list" class="documents" aria-label="Indexed documents"></ul>
+      </section>
+
+      <section class="card">
+        <h2>Repositories</h2>
+        <form id="repo-form" class="upload">
+          <label class="upload__label" for="repo-input">
+            Drop a project ZIP (code + docs)
+          </label>
+          <input id="repo-input" type="file" accept=".zip" />
+          <button id="repo-btn" type="submit">Upload &amp; index repo</button>
+          <p id="repo-status" class="status" role="status"></p>
+        </form>
+        <ul id="repository-list" class="documents" aria-label="Indexed repositories"></ul>
       </section>
     </aside>
 

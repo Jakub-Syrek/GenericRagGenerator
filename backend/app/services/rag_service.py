@@ -889,12 +889,20 @@ class RagService:
         metadata = node.metadata or {}
         text = node.get_content() or ""
         score = node.score if node.score is not None else 0.0
-        return {
+        descriptor: dict = {
             "document_id": str(metadata.get("doc_id") or metadata.get("ref_doc_id") or ""),
             "filename": str(metadata.get("filename", "")),
+            "kind": str(metadata.get("kind", "doc")),
+            "language": str(metadata.get("language", "")),
             "distance": float(1.0 - score),
             "preview": text[:240],
         }
+        if metadata.get("line_start") is not None and metadata.get("line_end") is not None:
+            descriptor["line_start"] = int(metadata["line_start"])
+            descriptor["line_end"] = int(metadata["line_end"])
+        if metadata.get("repository_name"):
+            descriptor["repository_name"] = str(metadata["repository_name"])
+        return descriptor
 
     @staticmethod
     def _build_prompt(messages: list[dict], nodes: list[NodeWithScore]) -> list[LiChatMessage]:

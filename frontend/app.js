@@ -6,6 +6,7 @@
 const API = {
   health: "/api/health",
   documents: "/api/documents",
+  repositories: "/api/repositories",
   chat: "/api/chat",
 };
 
@@ -16,6 +17,11 @@ const elements = {
   uploadStatus: document.getElementById("upload-status"),
   fileInput: document.getElementById("file-input"),
   documentList: document.getElementById("document-list"),
+  repoForm: document.getElementById("repo-form"),
+  repoBtn: document.getElementById("repo-btn"),
+  repoStatus: document.getElementById("repo-status"),
+  repoInput: document.getElementById("repo-input"),
+  repositoryList: document.getElementById("repository-list"),
   chatForm: document.getElementById("chat-form"),
   chatInput: document.getElementById("chat-input"),
   chatSend: document.getElementById("chat-send"),
@@ -32,7 +38,7 @@ const state = {
  */
 async function bootstrap() {
   attachListeners();
-  await Promise.all([refreshHealth(), refreshDocuments()]);
+  await Promise.all([refreshHealth(), refreshDocuments(), refreshRepositories()]);
 }
 
 /**
@@ -41,6 +47,7 @@ async function bootstrap() {
  */
 function attachListeners() {
   elements.uploadForm.addEventListener("submit", handleUpload);
+  elements.repoForm.addEventListener("submit", handleRepoUpload);
   elements.chatForm.addEventListener("submit", handleChat);
   elements.chatInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -196,6 +203,126 @@ async function handleDelete(documentId) {
 }
 
 /**
+ * Reload the indexed-repository list from the backend.
+ * @returns {Promise<void>}
+ */
+async function refreshRepositories() {
+  try {
+    const response = await fetch(API.repositories);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const repos = await response.json();
+    renderRepositories(repos);
+  } catch (error) {
+    elements.repositoryList.innerHTML = "";
+    setRepoStatus(`Failed to load repositories: ${error.message}`, "error");
+  }
+}
+
+/**
+ * Render the sidebar list of indexed repositories.
+ * @param {Array<{id:string,name:string,total_chunks:number,uploaded_at:string}>} repos
+ * @returns {void}
+ */
+function renderRepositories(repos) {
+  elements.repositoryList.innerHTML = "";
+  if (!repos.length) {
+    const empty = document.createElement("li");
+    empty.className = "empty";
+    empty.textContent = "No repositories yet.";
+    elements.repositoryList.appendChild(empty);
+    return;
+  }
+  for (const repo of repos) {
+    elements.repositoryList.appendChild(buildRepositoryItem(repo));
+  }
+}
+
+/**
+ * Build a single `<li>` for a repository entry.
+ * @param {{id:string,name:string,total_chunks:number}} repo Repository metadata.
+ * @returns {HTMLLIElement}
+ */
+function buildRepositoryItem(repo) {
+  const item = document.createElement("li");
+  item.className = "document";
+
+  const text = document.createElement("div");
+  const name = document.createElement("div");
+  name.className = "document__name";
+  name.textContent = repo.name || repo.id;
+  const meta = document.createElement("div");
+  meta.className = "document__meta";
+  meta.textContent = `${repo.total_chunks} chunks`;
+  text.append(name, meta);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "document__delete";
+  remove.textContent = "remove";
+  remove.addEventListener("click", () => handleRepoDelete(repo.id));
+
+  item.append(text, remove);
+  return item;
+}
+
+/**
+ * Submit the repository ZIP upload form.
+ * @param {SubmitEvent} event Form submit event.
+ * @returns {Promise<void>}
+ */
+async function handleRepoUpload(event) {
+  event.preventDefault();
+  const file = elements.repoInput.files?.[0];
+  if (!file) {
+    setRepoStatus("Pick a ZIP file first.", "error");
+    return;
+  }
+  toggleRepoUpload(true);
+  setRepoStatus(`Uploading ${file.name}…`, "info");
+
+  try {
+    const body = new FormData();
+    body.append("file", file);
+    const response = await fetch(API.repositories, { method: "POST", body });
+    if (!response.ok) {
+      throw new Error(await safeDetail(response));
+    }
+    const payload = await response.json();
+    const repository = payload.repository;
+    const summary = `${repository.files_indexed} files (${repository.total_chunks} chunks)`;
+    const skipped = repository.skipped?.length
+      ? ` — skipped ${repository.skipped.length}`
+      : "";
+    setRepoStatus(`Indexed ${repository.name}: ${summary}${skipped}.`, "success");
+    elements.repoForm.reset();
+    await refreshRepositories();
+  } catch (error) {
+    setRepoStatus(`Upload failed: ${error.message}`, "error");
+  } finally {
+    toggleRepoUpload(false);
+  }
+}
+
+/**
+ * Delete a repository by id.
+ * @param {string} repositoryId Repository identifier.
+ * @returns {Promise<void>}
+ */
+async function handleRepoDelete(repositoryId) {
+  try {
+    const response = await fetch(`${API.repositories}/${repositoryId}`, { method: "DELETE" });
+    if (!response.ok && response.status !== 204) {
+      throw new Error(await safeDetail(response));
+    }
+    await refreshRepositories();
+  } catch (error) {
+    setRepoStatus(`Delete failed: ${error.message}`, "error");
+  }
+}
+
+/**
  * Send a chat message and stream the assistant response.
  * @param {SubmitEvent} event Form submit event.
  * @returns {Promise<void>}
@@ -280,7 +407,7 @@ function handleEvent(event, bubble, accumulated) {
 /**
  * Render the citation chips above an assistant bubble.
  * @param {HTMLElement} bubble Assistant message element.
- * @param {Array<{filename:string}>} sources Source descriptors.
+ * @param {Array<{filename:string,kind?:string,line_start?:number,line_end?:number,repository_name?:string,preview?:string}>} sources Source descriptors.
  * @returns {void}
  */
 function renderSources(bubble, sources) {
@@ -295,17 +422,55 @@ function renderSources(bubble, sources) {
   container.className = "sources";
   const seen = new Set();
   for (const source of sources) {
-    if (seen.has(source.filename)) {
+    const key = sourceKey(source);
+    if (seen.has(key)) {
       continue;
     }
-    seen.add(source.filename);
-    const chip = document.createElement("span");
-    chip.className = "source";
-    chip.textContent = source.filename;
-    chip.title = source.preview ?? "";
-    container.appendChild(chip);
+    seen.add(key);
+    container.appendChild(buildSourceChip(source));
   }
   bubble.prepend(container);
+}
+
+/**
+ * Stable de-duplication key for a source (path + line range).
+ * @param {{filename:string,line_start?:number,line_end?:number}} source Source descriptor.
+ * @returns {string} Composite key.
+ */
+function sourceKey(source) {
+  const range = source.line_start ? `:${source.line_start}-${source.line_end}` : "";
+  return `${source.filename}${range}`;
+}
+
+/**
+ * Build one citation chip element.
+ * @param {{filename:string,kind?:string,line_start?:number,line_end?:number,repository_name?:string,preview?:string}} source Source descriptor.
+ * @returns {HTMLSpanElement}
+ */
+function buildSourceChip(source) {
+  const chip = document.createElement("span");
+  const isCode = source.kind === "code";
+  chip.className = isCode ? "source source--code" : "source";
+
+  const kind = document.createElement("span");
+  kind.className = "source__kind";
+  kind.textContent = isCode ? "code" : "doc";
+  chip.appendChild(kind);
+
+  const path = document.createElement("span");
+  path.className = "source__path";
+  const prefix = source.repository_name ? `${source.repository_name}/` : "";
+  path.textContent = `${prefix}${source.filename}`;
+  chip.appendChild(path);
+
+  if (source.line_start && source.line_end) {
+    const lines = document.createElement("span");
+    lines.className = "source__lines";
+    lines.textContent = `:${source.line_start}-${source.line_end}`;
+    chip.appendChild(lines);
+  }
+  chip.title = source.preview ?? "";
+  return chip;
 }
 
 /**
@@ -350,6 +515,27 @@ function setBubbleText(bubble, text) {
 function toggleUpload(busy) {
   elements.uploadBtn.disabled = busy;
   elements.fileInput.disabled = busy;
+}
+
+/**
+ * Toggle repository upload form interactivity.
+ * @param {boolean} busy Whether the repo upload is in progress.
+ * @returns {void}
+ */
+function toggleRepoUpload(busy) {
+  elements.repoBtn.disabled = busy;
+  elements.repoInput.disabled = busy;
+}
+
+/**
+ * Set the repository upload status message.
+ * @param {string} message Text to display.
+ * @param {"info"|"error"|"success"} variant Visual variant.
+ * @returns {void}
+ */
+function setRepoStatus(message, variant) {
+  elements.repoStatus.textContent = message;
+  elements.repoStatus.className = `status status--${variant}`;
 }
 
 /**

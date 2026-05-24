@@ -216,10 +216,31 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .source {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   background: rgba(56, 189, 248, 0.15);
   color: var(--accent);
-  padding: 0.15rem 0.5rem;
+  padding: 0.15rem 0.55rem;
   border-radius: 999px;
+}
+
+.source--code {
+  background: rgba(167, 139, 250, 0.15);
+  color: #c4b5fd;
+}
+
+.source__kind {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
+.source__path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.source__lines {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  opacity: 0.75;
 }
 
 .chat-form {
