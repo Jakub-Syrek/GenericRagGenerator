@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     chunk_size: int = 800
     chunk_overlap: int = 120
-    top_k: int = 6
+    top_k: int = 60
 
     embedding_query_prefix: str = "search_query: "
     embedding_document_prefix: str = "search_document: "
