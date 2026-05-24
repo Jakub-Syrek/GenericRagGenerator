@@ -69,6 +69,14 @@ def service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RagService:
     # tests that import it; this assignment also keeps it imported.
     _ = CodeChunker
     instance._index = _NoopIndex()
+
+    class _StubHybrid:
+        """No-op hybrid retriever for tests that don't exercise BM25."""
+
+        def invalidate(self) -> None:
+            pass
+
+    instance._hybrid = _StubHybrid()
     return instance
 
 

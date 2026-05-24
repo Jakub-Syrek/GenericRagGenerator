@@ -36,6 +36,7 @@ from ..config import Settings
 from ..models.schemas import DocumentInfo
 from .chunking import ChunkerRegistry, CodeChunker, MarkdownChunker, SentenceChunker
 from .document_loader import DocumentLoader, Kind, UnsupportedFormatError
+from .hybrid_retrieval import HybridRetriever
 from .index_catalog import IndexCatalog
 
 COLLECTION_NAME = "documents"
@@ -287,6 +288,7 @@ class RagService:
         except Exception as exc:
             raise VectorStoreError(f"Failed to open Chroma collection: {exc}") from exc
         self._catalog = IndexCatalog(self._collection)
+        self._hybrid = HybridRetriever(self._catalog)
         vector_store = ChromaVectorStore(chroma_collection=self._collection)
 
         self._embed_model = _PrefixedOllamaEmbedding(
@@ -349,6 +351,7 @@ class RagService:
             self._index.insert_nodes(nodes)
         except Exception as exc:
             raise EmbeddingError(f"Failed to embed and store chunks: {exc}") from exc
+        self._hybrid.invalidate()
 
         try:
             self._persist_raw(document_id, filename, payload)
@@ -388,9 +391,12 @@ class RagService:
         @returns Number of chunks deleted.
         """
         try:
-            return self._catalog.delete_document(document_id)
+            removed = self._catalog.delete_document(document_id)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete document {document_id}: {exc}") from exc
+        if removed:
+            self._hybrid.invalidate()
+        return removed
 
     def get_document(self, document_id: str) -> DocumentDetailRecord | None:
         """Return metadata + a content preview for one indexed document.
@@ -480,7 +486,79 @@ class RagService:
             nodes = retriever.retrieve(query)
         except Exception as exc:
             raise EmbeddingError(f"Search retrieval failed: {exc}") from exc
-        return [self._scored_chunk_from_node(node) for node in nodes]
+        scored = [self._scored_chunk_from_node(node) for node in nodes]
+        if self._settings.retrieval_mode == "hybrid":
+            scored = self._apply_hybrid_rerank(
+                query=query,
+                scored=scored,
+                top_k=limit,
+                scope_predicate=self._scope_predicate(document_ids, repository_ids, kinds),
+            )
+        return scored
+
+    def _apply_hybrid_rerank(
+        self,
+        *,
+        query: str,
+        scored: list[ScoredChunkRecord],
+        top_k: int,
+        scope_predicate: Any,
+    ) -> list[ScoredChunkRecord]:
+        """Fuse the dense hits with a BM25 pass using Reciprocal Rank Fusion.
+
+        @param query           Raw user query (re-tokenised for BM25).
+        @param scored          Dense hits already lifted into `ScoredChunkRecord`s.
+        @param top_k           How many fused hits to keep.
+        @param scope_predicate Callable filtering BM25 metadata to match the
+                               dense scope (or `None` for no filtering).
+        @returns Reordered `ScoredChunkRecord` list (dense fallbacks preserved).
+        """
+        dense_hits = [
+            (item.chunk.chunk_id, item.score, item.chunk.preview, item.chunk.__dict__) for item in scored
+        ]
+        try:
+            fused = self._hybrid.search(
+                query=query,
+                dense_hits=dense_hits,
+                top_k=top_k,
+                scope_predicate=scope_predicate,
+            )
+        except Exception:
+            # Hybrid is opt-in and best-effort: never regress retrieval if
+            # BM25 misbehaves. Fall back to the dense ranking.
+            return scored
+        by_id = {item.chunk.chunk_id: item for item in scored}
+        return [by_id[hit.chunk_id] for hit in fused if hit.chunk_id in by_id]
+
+    @staticmethod
+    def _scope_predicate(
+        document_ids: list[str] | None,
+        repository_ids: list[str] | None,
+        kinds: list[str] | None,
+    ) -> Any:
+        """Build a metadata predicate matching the dense filter set.
+
+        @param document_ids   Optional doc-id allowlist.
+        @param repository_ids Optional repo-id allowlist.
+        @param kinds          Optional kind allowlist.
+        @returns Callable `(metadata) -> bool`, or `None` when no scope.
+        """
+        if not (document_ids or repository_ids or kinds):
+            return None
+        docs_set = set(document_ids or [])
+        repos_set = set(repository_ids or [])
+        kinds_set = set(kinds or [])
+
+        def predicate(metadata: dict[str, Any]) -> bool:
+            if docs_set:
+                doc_id = str(metadata.get("doc_id") or metadata.get("ref_doc_id") or "")
+                if doc_id not in docs_set:
+                    return False
+            if repos_set and str(metadata.get("repository_id", "")) not in repos_set:
+                return False
+            return not (kinds_set and str(metadata.get("kind", "")) not in kinds_set)
+
+        return predicate
 
     @staticmethod
     def _row_to_chunk(chunk_id: str, metadata: dict, text: str) -> ChunkRecord:
@@ -655,9 +733,12 @@ class RagService:
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            return self._catalog.delete_repository(repository_id)
+            removed = self._catalog.delete_repository(repository_id)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete repository {repository_id}: {exc}") from exc
+        if removed:
+            self._hybrid.invalidate()
+        return removed
 
     def wipe(self) -> int:
         """Remove every chunk in the index (administrative reset).
@@ -666,9 +747,11 @@ class RagService:
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            return self._catalog.wipe()
+            removed = self._catalog.wipe()
         except Exception as exc:
             raise VectorStoreError(f"Failed to wipe index: {exc}") from exc
+        self._hybrid.invalidate()
+        return removed
 
     def ingest_project(self, *, project_name: str, files: list[tuple[str, bytes]]) -> RepositoryRecord:
         """Index a multi-file project uploaded as one logical bundle.
@@ -820,9 +903,12 @@ class RagService:
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            return self._catalog.delete_project(project_id)
+            removed = self._catalog.delete_project(project_id)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete project {project_id}: {exc}") from exc
+        if removed:
+            self._hybrid.invalidate()
+        return removed
 
     async def query_once(
         self,
@@ -1172,6 +1258,7 @@ class RagService:
             self._index.insert_nodes(all_nodes)
         except Exception as exc:
             raise EmbeddingError(f"Failed to embed repository chunks: {exc}") from exc
+        self._hybrid.invalidate()
         return files
 
     def _persist_raw_repository(self, repository_id: str, archive_name: str, payload: bytes) -> None:

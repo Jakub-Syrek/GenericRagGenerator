@@ -199,6 +199,24 @@ class IndexCatalog:
         """
         return self._delete_where({"repository_id": repository_id})
 
+    def all_chunks(self) -> list[ChunkRow]:
+        """Return every chunk in the collection (metadata + body).
+
+        Used by the BM25 layer to build its in-memory inverted index. The
+        result is one list — for very large indices the caller is
+        responsible for caching or chunking the consumption.
+
+        @returns Ordered list of every `ChunkRow` (storage order).
+        """
+        data = self._collection.get(include=self._CHUNK_INCLUDE)
+        ids = data.get("ids", []) or []
+        metadatas = data.get("metadatas") or []
+        documents = data.get("documents") or []
+        return [
+            ChunkRow(chunk_id=chunk_id, text=str(text or ""), metadata=dict(metadata or {}))
+            for chunk_id, metadata, text in zip(ids, metadatas, documents, strict=False)
+        ]
+
     def wipe(self) -> int:
         """Remove every chunk in the index (administrative reset).
 

@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,13 @@ class Settings(BaseSettings):
 
     embedding_query_prefix: str = "search_query: "
     embedding_document_prefix: str = "search_document: "
+
+    # "vector" (default) = dense embeddings only.
+    # "hybrid"           = dense + BM25 lexical, fused via Reciprocal Rank
+    #                      Fusion. Helps with rare-token queries (function
+    #                      names, error codes); costs an in-memory BM25
+    #                      corpus rebuild on first query after writes.
+    retrieval_mode: Literal["vector", "hybrid"] = "vector"
 
     app_host: str = "127.0.0.1"
     app_port: int = 8000
