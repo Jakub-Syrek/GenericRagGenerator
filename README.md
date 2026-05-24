@@ -107,12 +107,26 @@ winget install NSSM.NSSM
 ```
 
 The script registers the service under the name `GenericRagGenerator`,
-binds to `127.0.0.1:8000`, captures stdout/stderr into rotated logs
-under `.\logs\service-*.log` (10 MB rotation) and restarts the process
-after 5 s on failure. Override the defaults with parameters:
+binds to `127.0.0.1:8000` (default `local` mode), captures stdout/stderr
+into rotated logs under `.\logs\service-*.log` (10 MB rotation) and
+restarts the process after 5 s on failure.
+
+Two install profiles via `-Mode`:
+
+| Mode      | Bind         | When to use                                            |
+|-----------|--------------|--------------------------------------------------------|
+| `local`   | `127.0.0.1`  | Single-user / personal box. API reachable only locally. |
+| `public`  | `0.0.0.0`    | Shared host / corp deployment. Refuses to install unless `API_KEY` (or `AUTH_PASSWORD` + `JWT_SECRET`) is set in `.env`. |
 
 ```powershell
-.\scripts\install-windows-service.ps1 -ServiceName MyRag -BindHost 0.0.0.0 -Port 9000
+# Local-only (default): API on http://127.0.0.1:8000
+.\scripts\install-windows-service.ps1
+
+# Public bind on a custom port (must set auth in .env first)
+.\scripts\install-windows-service.ps1 -Mode public -Port 9000
+
+# Public + hide Swagger / Redoc / OpenAPI
+.\scripts\install-windows-service.ps1 -Mode public -DisableDocs
 ```
 
 Operational commands:
