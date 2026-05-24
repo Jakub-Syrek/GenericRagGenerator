@@ -2,6 +2,7 @@
 __pycache__/
 eval/corpus/
 eval/results/
+logs/
 *.py[cod]
 *.egg-info/
 .venv/

@@ -65,6 +65,49 @@ the sidebar, then ask questions in the chat pane. The assistant streams the
 answer token-by-token and shows citation chips for every chunk it pulled
 from the vector store.
 
+## Optional: install as a Windows service
+
+NSSM ([nssm.cc](https://nssm.cc)) wraps the `.venv` uvicorn process as a
+proper Windows service with auto-start, log rotation and restart-on-failure.
+Two PowerShell helpers under `scripts/` automate it:
+
+```powershell
+# 1. Install NSSM once (admin PowerShell):
+winget install NSSM.NSSM
+# or:  choco install nssm
+# or:  drop nssm.exe somewhere on PATH manually
+
+# 2. From the project root, in an *elevated* PowerShell:
+.\scripts\install-windows-service.ps1
+```
+
+The script registers the service under the name `GenericRagGenerator`,
+binds to `127.0.0.1:8000`, captures stdout/stderr into rotated logs
+under `.\logs\service-*.log` (10 MB rotation) and restarts the process
+after 5 s on failure. Override the defaults with parameters:
+
+```powershell
+.\scripts\install-windows-service.ps1 -ServiceName MyRag -BindHost 0.0.0.0 -Port 9000
+```
+
+Operational commands:
+
+```powershell
+Get-Service GenericRagGenerator        # status
+Restart-Service GenericRagGenerator    # reload after .env / code changes
+Stop-Service GenericRagGenerator       # graceful stop (15 s window)
+.\scripts\uninstall-windows-service.ps1
+```
+
+Notes for production:
+- Ollama itself ships as a service via its installer; both can run
+  side-by-side on the same box.
+- Run the service under a least-privileged local account
+  (`nssm set GenericRagGenerator ObjectName .\rag-user <password>`)
+  rather than `LocalSystem` when the host is shared.
+- Set `API_KEY` in `.env` before installing the service so the public
+  surface is gated from the first start.
+
 ## Run in Docker (corp-friendly)
 
 ```bash
@@ -126,6 +169,8 @@ eval/              RAG quality eval (corpus + runner + sample report)
   sample_repo/     Synthetic mini_parser fixture (code + HTML + Markdown)
 tests/             Pytest suite (unit + API integration with TestClient)
 data/              Runtime (uploads + Chroma persistence) - gitignored
+logs/              Windows-service stdout / stderr (NSSM-managed) - gitignored
+scripts/           PowerShell helpers (install / uninstall Windows service)
 Dockerfile         Multi-stage, non-root, healthcheck
 docker-compose.yml App + Ollama + hardening
 SECURITY.md        Threat model and deployment guidance
