@@ -18,13 +18,16 @@ class EvalQuestion:
     """One canned question with scoring rules.
 
     `expected_top_source` is the filename the retriever is expected to surface
-    as the top hit. `None` marks an out-of-corpus probe: the assistant must
-    refuse to answer (`expected_any` is then empty and `ooc` is True).
+    as the top hit. `expected_kind` (optional) asserts the kind of the top
+    source. `None` for `expected_top_source` marks an out-of-corpus probe:
+    the assistant must refuse to answer (`expected_any` is then empty and
+    `ooc` is True).
     """
 
     prompt: str
     expected_any: tuple[str, ...]
     expected_top_source: str | None
+    expected_kind: str | None = None
     ooc: bool = False
 
 
@@ -65,7 +68,10 @@ CORPUS: tuple[EvalDocument, ...] = (
         filename="rag.txt",
         questions=(
             EvalQuestion(
-                prompt="What does RAG stand for?",
+                prompt=(
+                    "In the article about retrieval-augmented generation, what is the "
+                    "full name behind the acronym RAG?"
+                ),
                 expected_any=("retrieval-augmented generation", "retrieval augmented generation"),
                 expected_top_source="rag.txt",
             ),
@@ -179,5 +185,42 @@ CORPUS: tuple[EvalDocument, ...] = (
                 ooc=True,
             ),
         ),
+    ),
+)
+
+
+REPOSITORY_NAME = "mini_parser"
+
+
+REPOSITORY_QUESTIONS: tuple[EvalQuestion, ...] = (
+    EvalQuestion(
+        prompt="What transformation does the slugify helper apply to its input string?",
+        expected_any=("lowercase", "lower", "hyphen", "whitespace"),
+        expected_top_source="src/utils/strings.py",
+        expected_kind="code",
+    ),
+    EvalQuestion(
+        prompt="What does parse_sentence do in the mini_parser project?",
+        expected_any=("token", "whitespace", "punctuation", "split"),
+        expected_top_source="src/parser.py",
+        expected_kind="code",
+    ),
+    EvalQuestion(
+        prompt="According to the README, how do you run the mini_parser project from the command line?",
+        expected_any=("python -m mini_parser.cli", "mini_parser.cli"),
+        expected_top_source="README.md",
+        expected_kind="doc",
+    ),
+    EvalQuestion(
+        prompt="What three layers are described in the architecture document?",
+        expected_any=("cli", "parser", "utils"),
+        expected_top_source="docs/architecture.html",
+        expected_kind="doc",
+    ),
+    EvalQuestion(
+        prompt="Which Python standard-library module does the mini_parser CLI import to parse arguments?",
+        expected_any=("argparse",),
+        expected_top_source="src/cli.py",
+        expected_kind="code",
     ),
 )

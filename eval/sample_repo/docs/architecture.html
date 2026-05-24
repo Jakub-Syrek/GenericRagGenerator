@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mini Parser - Architecture</title>
+</head>
+<body>
+  <h1>Architecture</h1>
+  <p>
+    The Mini Parser project is split into three layers, each living under
+    <code>src/</code>:
+  </p>
+  <ol>
+    <li>
+      <strong>cli</strong> &mdash; the entry point. Parses command-line
+      arguments and orchestrates the pipeline.
+    </li>
+    <li>
+      <strong>parser</strong> &mdash; splits sentences into tokens via the
+      <code>parse_sentence</code> function. Strips punctuation before
+      tokenising.
+    </li>
+    <li>
+      <strong>utils.strings</strong> &mdash; hosts the <code>slugify</code>
+      helper that lowercases its input and replaces whitespace with
+      hyphens.
+    </li>
+  </ol>
+  <p>
+    Data flows linearly from the CLI through the parser to the utils
+    layer; there are no cycles or side effects beyond stdout writes.
+  </p>
+</body>
+</html>
