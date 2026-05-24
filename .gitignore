@@ -1,5 +1,7 @@
 .claude/
 __pycache__/
+eval/corpus/
+eval/results/
 *.py[cod]
 *.egg-info/
 .venv/
