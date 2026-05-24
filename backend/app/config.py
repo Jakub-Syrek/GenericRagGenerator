@@ -25,7 +25,10 @@ class Settings(BaseSettings):
 
     chunk_size: int = 800
     chunk_overlap: int = 120
-    top_k: int = 60
+    # top_k = 8 is the sane production default. The eval ran at 60 only to
+    # show ranking holds on a tiny corpus; on a real index (thousands of
+    # chunks) 60 stuffs the prompt and explodes latency.
+    top_k: int = 8
 
     embedding_query_prefix: str = "search_query: "
     embedding_document_prefix: str = "search_document: "

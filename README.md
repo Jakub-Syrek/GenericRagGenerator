@@ -269,19 +269,45 @@ POST /api/admin/reset    // Authorization: Bearer <admin-token>
 
 ## Architecture
 
-The codebase is intentionally SOLID-shaped and uses a handful of named
-design patterns where they buy something concrete:
+A few extractions earn their keep — the rest is plain FastAPI / Pydantic
+/ `logging`:
 
-| Pattern                       | Where                                              |
-|-------------------------------|----------------------------------------------------|
-| **Strategy + Registry**       | `services/chunking.py` — `Chunker` protocol, `SentenceChunker`/`MarkdownChunker`/`CodeChunker`, `ChunkerRegistry` for `(kind, language) -> Chunker` resolution |
-| **Repository**                | `services/index_catalog.py` — `IndexCatalog` is the only class that imports `chromadb`; returns frozen domain dataclasses |
-| **Facade**                    | `services/rag_service.py` — `RagService` delegates to loader / chunker registry / catalog / LLM client; routes never see the pieces |
-| **Adapter**                   | `_PrefixedOllamaEmbedding` adapts `OllamaEmbedding` to nomic's asymmetric query/document prefixes |
-| **Specification / Value Object** | `security/auth.py` — `Principal` is the immutable identity for one request; `has_scope("admin")` reads as a specification |
-| **Chain of Responsibility**   | `require_credentials` tries API key first, then Bearer JWT, before failing closed |
-| **Decorator (middleware)**    | `SecurityHeadersMiddleware`, `SlowAPIMiddleware`, `CORSMiddleware` wrap every request without leaking into handler code |
-| **Dependency Injection**      | Pervasive via FastAPI `Depends`; cached singletons via `functools.lru_cache` providers in `dependencies.py` |
+| Where                           | Why it's not just inline code                                                                            |
+|---------------------------------|----------------------------------------------------------------------------------------------------------|
+| `services/chunking.py`          | `Chunker` protocol + `ChunkerRegistry`. The alternative was an `if kind == "code" elif language == ...` chain that grew on every new format. |
+| `services/index_catalog.py`     | `IndexCatalog` is the only class that imports `chromadb`. Swapping ChromaDB for Qdrant/pgvector touches one file. |
+| `services/rag_service.py`       | Composition root. Handlers depend on the facade, never on the underlying LlamaIndex/Chroma/Ollama trio. |
+| `security/_PrefixedOllamaEmbedding` | nomic-embed-text needs `search_query:` / `search_document:` prefixes; this is the only class that knows that. |
+
+## Known limitations
+
+This is a focused single-tenant RAG service, not a production search
+platform. Concretely missing, in rough order of impact:
+
+- **No reranker.** Top-k from the embedder goes straight into the
+  prompt. A cross-encoder (e.g. `bge-reranker-v2-m3`) on top of the
+  retriever would lift precision a lot.
+- **No hybrid search.** Pure embedding similarity — no BM25, no
+  keyword/lexical fallback. Queries with rare identifiers (function
+  names, error codes) suffer.
+- **No semantic / query cache.** Identical questions re-embed and
+  re-prompt every time.
+- **No incremental indexing.** Re-uploading a changed document
+  re-embeds from scratch; there is no diff-based update path.
+- **No ACL / multi-user permissions.** Anyone with the API key (or
+  bearer) sees every document. Multi-tenant deployments need a
+  reverse-proxy enforcing per-user scopes.
+- **Parser sandboxing.** PDF / DOCX / HTML are parsed in-process; a
+  malicious payload that crashes `pypdf` or `python-docx` crashes the
+  worker. A separate subprocess (`subprocess.run` with `nsjail` /
+  `firejail`, or a sidecar container) would isolate that blast
+  radius.
+- **Embeddings batching.** `index.insert_nodes` already batches, but
+  there's no rate-limit-aware retry on the Ollama call. A sustained
+  burst will surface as 502s rather than backoff.
+
+These are intentionally out of scope for v0.x — most of them are
+real engineering work, not a flag flip.
 
 The chat stream emits one JSON event per line:
 - `{"type": "sources", "sources": [...]}` once at the top, where each
@@ -380,7 +406,7 @@ CI and live in `smoke_test.py` plus the `eval/` package.
 | `EMBEDDING_QUERY_PREFIX`    | `"search_query: "`            | Prefix prepended to query embeddings (nomic asymmetric).    |
 | `EMBEDDING_DOCUMENT_PREFIX` | `"search_document: "`         | Prefix prepended to document embeddings.                    |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `800` / `120`              | Sentence-splitter window in characters.                     |
-| `TOP_K`                     | `60`                          | Retriever top-k. Tuned for small local corpora; drop to 4–8 on large indexes. |
+| `TOP_K`                     | `8`                           | Retriever top-k. Bump higher only on small / synthetic corpora; on a real index it just stuffs the prompt. |
 | `API_KEY`                   | *(unset)*                     | When set, gates `/api/documents`, `/api/repositories`, `/api/chat` behind `X-API-Key`. |
 | `CORS_ORIGINS`              | `["http://localhost:8000", ...]` | Strict allowlist for browsers.                          |
 | `RATE_LIMIT_CHAT`           | `30/minute`                   | Per-IP slowapi limit on `/api/chat`.                        |
