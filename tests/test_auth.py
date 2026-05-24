@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
 from app.dependencies import get_rag_service
 from app.main import app
+from app.security.audit import LOGGER_NAME
 
 
 class _AdminFakeService:
@@ -24,6 +28,22 @@ class _AdminFakeService:
     def list_documents(self) -> list:
         """Stub for routes that share the dependency override."""
         return []
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_rate_limit() -> None:
+    """Clear the in-memory slowapi storage between tests.
+
+    The login endpoint enforces 5/minute per IP; without resetting,
+    later tests in the same session would hit 429 and confuse the
+    happy-path assertions. We poke slowapi's storage directly because
+    `app.state.limiter` keeps a singleton across tests.
+    """
+    from app.main import app as _app
+
+    limiter = getattr(_app.state, "limiter", None)
+    if limiter is not None and hasattr(limiter, "_storage") and hasattr(limiter._storage, "reset"):
+        limiter._storage.reset()
 
 
 @pytest.fixture
@@ -114,3 +134,30 @@ def test_admin_reset_invokes_wipe_when_authenticated(client: TestClient) -> None
     response = client.post("/api/admin/reset", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert response.json()["chunks_removed"] == 42
+
+
+def test_failed_login_emits_audit_event(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
+    """Bad credentials produce a structured `login.failed` audit entry."""
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "wrong"},  # pragma: allowlist secret
+    )
+    payloads = [json.loads(record.message) for record in caplog.records if record.name == LOGGER_NAME]
+    assert any(
+        entry.get("event") == "login.failed" and entry.get("username") == "admin" for entry in payloads
+    )
+
+
+def test_admin_reset_emits_audit_event(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
+    """A successful reset emits an `admin.reset` audit entry with the principal."""
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    token = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "letmein"},  # pragma: allowlist secret
+    ).json()["access_token"]
+    client.post("/api/admin/reset", headers={"Authorization": f"Bearer {token}"})
+    payloads = [json.loads(record.message) for record in caplog.records if record.name == LOGGER_NAME]
+    reset_entries = [entry for entry in payloads if entry.get("event") == "admin.reset"]
+    assert reset_entries and reset_entries[0]["principal"] == "admin"
+    assert reset_entries[0]["chunks_removed"] == 42

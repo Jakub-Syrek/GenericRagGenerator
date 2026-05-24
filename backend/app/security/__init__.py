@@ -5,6 +5,7 @@ This package re-exports the public surface so callers can keep doing
 require_api_key` after the v1 layout was split into focused modules.
 """
 
+from .audit import AuditLogger, audit
 from .auth import (
     CredentialChecker,
     Principal,
@@ -16,14 +17,19 @@ from .auth import (
 )
 from .headers import SECURITY_HEADERS, SecurityHeadersMiddleware
 from .rate_limit import build_limiter, limiter
+from .request_id import REQUEST_ID_HEADER, RequestIdMiddleware
 
 __all__ = [
+    "REQUEST_ID_HEADER",
     "SECURITY_HEADERS",
+    "AuditLogger",
     "CredentialChecker",
     "Principal",
+    "RequestIdMiddleware",
     "SecurityHeadersMiddleware",
     "TokenIssuer",
     "TokenVerifier",
+    "audit",
     "build_limiter",
     "limiter",
     "require_admin",

@@ -25,7 +25,7 @@ from .api import (
     search,
 )
 from .config import get_settings
-from .security import SecurityHeadersMiddleware, limiter
+from .security import RequestIdMiddleware, SecurityHeadersMiddleware, limiter
 
 _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 
@@ -84,6 +84,7 @@ def create_app() -> FastAPI:
     application.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
     application.add_middleware(SlowAPIMiddleware)
     application.add_middleware(SecurityHeadersMiddleware)
+    application.add_middleware(RequestIdMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

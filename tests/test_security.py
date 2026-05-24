@@ -79,3 +79,16 @@ def test_health_never_requires_api_key(monkeypatch: pytest.MonkeyPatch, client: 
     finally:
         monkeypatch.delenv("API_KEY", raising=False)
         get_settings.cache_clear()
+
+
+def test_request_id_is_echoed_when_supplied(client: TestClient) -> None:
+    """`X-Request-ID` supplied by the client is echoed back unchanged."""
+    response = client.get("/api/health", headers={"X-Request-ID": "trace-42"})
+    assert response.headers["X-Request-ID"] == "trace-42"
+
+
+def test_request_id_is_minted_when_missing(client: TestClient) -> None:
+    """Missing `X-Request-ID` triggers a freshly minted correlation id."""
+    response = client.get("/api/health")
+    assert response.headers["X-Request-ID"]
+    assert len(response.headers["X-Request-ID"]) >= 16

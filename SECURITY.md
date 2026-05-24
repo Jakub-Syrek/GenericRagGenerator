@@ -36,13 +36,39 @@ API gateway, etc.).
   `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy:
   no-referrer`, `Permissions-Policy` and a tight `Content-Security-
   Policy` are stamped on every response by `SecurityHeadersMiddleware`.
-- **Unauthenticated API access in shared deployments** — setting the
-  `API_KEY` environment variable activates a `require_api_key`
-  dependency on every `/api/documents`, `/api/repositories` and
-  `/api/chat` route. Health probes deliberately stay free.
-- **Chat-endpoint abuse** — [`slowapi`](https://github.com/laurentS/slowapi)
-  enforces a per-IP rate limit on `/api/chat` (default 30/minute), with
-  the limit configurable via `RATE_LIMIT_CHAT`.
+- **Unauthenticated API access in shared deployments** — `API_KEY`
+  (constant-time `hmac.compare_digest`) and/or interactive JWT bearer
+  (HS256, scoped) gate every state-changing endpoint. `require_admin`
+  protects `/api/admin/reset`. Health probes deliberately stay free.
+- **Credential stuffing on the login endpoint** —
+  `POST /api/auth/login` is rate-limited per IP (5/minute by default)
+  via `slowapi`; failed and successful attempts are both audit-logged
+  so brute-force patterns surface in SIEM ingestion.
+- **Chat-endpoint abuse** — `slowapi` also enforces a per-IP rate
+  limit on `/api/chat` (default 30/minute), configurable via
+  `RATE_LIMIT_CHAT`.
+- **Forensics + correlation** — `RequestIdMiddleware` stamps every
+  request with an `X-Request-ID` (mints one when the client omits it,
+  echoes it otherwise). `AuditLogger` emits one-line JSON entries on
+  `ggrag.audit` for `login.failed`, `login.success`, `admin.reset`
+  and `admin.reset.failed` events with `principal`, `client`,
+  `request_id` and reason fields so operators can trace a single
+  action across the access log and the audit log.
+
+### OWASP API Security Top 10 alignment
+
+| Risk                                                            | Posture                                                                                                   |
+|-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| API1 – Broken Object Level Authorisation                        | Single-tenant by design; no per-user objects. Scope a deployment behind a reverse proxy for multi-tenant. |
+| API2 – Broken Authentication                                    | `hmac.compare_digest` API key + HS256 JWT, login rate-limit, scoped tokens, audit log of every attempt.   |
+| API3 – Excessive Data Exposure                                  | Responses serialised via explicit Pydantic schemas; no model-derived fields leak by accident.             |
+| API4 – Lack of Resources & Rate Limiting                        | `slowapi` per-IP limits on `/api/chat` + `/api/auth/login`; upload size caps; ZIP member-count cap.       |
+| API5 – Broken Function Level Authorisation                      | `require_admin` scope check on destructive endpoints; OpenAPI tags + descriptions are explicit.           |
+| API6 – Mass Assignment                                          | Pydantic `BaseModel` defines every accepted field; unknown body fields are rejected by default.           |
+| API7 – Security Misconfiguration                                | Strict CSP / XFO DENY / HSTS / Permissions-Policy headers stamped on every response; `/docs` disablable.   |
+| API8 – Injection                                                | No SQL; Chroma metadata filters go through typed `MetadataFilter` objects, not raw string interpolation.  |
+| API9 – Improper Asset Management                                | OpenAPI versioning via `version: "0.2.0"`; `DOCS_ENABLED` flag hides discovery surfaces in prod.         |
+| API10 – Insufficient Logging & Monitoring                       | `RequestIdMiddleware` + structured `AuditLogger` emit JSON events on every security-relevant action.      |
 
 ### Out of scope (assumed trusted)
 
