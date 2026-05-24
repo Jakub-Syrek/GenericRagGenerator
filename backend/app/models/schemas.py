@@ -119,6 +119,45 @@ class SearchResponse(BaseModel):
     total: int
 
 
+class ProjectInfo(BaseModel):
+    """Aggregate description of a multi-source ingested project."""
+
+    id: str
+    name: str
+    files_indexed: int
+    total_chunks: int
+    files: list[IngestedFileInfo]
+    skipped: list[SkippedFileInfo]
+    uploaded_at: datetime
+
+
+class ProjectDetail(ProjectInfo):
+    """Project descriptor with the per-file ingest list filled in."""
+
+
+class ProjectUploadResponse(BaseModel):
+    """Response payload returned after a successful project ingest."""
+
+    project: ProjectInfo
+    message: str = "Project indexed successfully."
+
+
+class QueryRequest(BaseModel):
+    """Payload for `POST /api/query` (synchronous RAG answer)."""
+
+    messages: list["ChatMessage"] = Field(min_length=1)
+    document_ids: list[str] | None = None
+    repository_ids: list[str] | None = None
+    project_ids: list[str] | None = None
+
+
+class QueryResponse(BaseModel):
+    """Synchronous answer payload."""
+
+    answer: str
+    sources: list[SearchHit]
+
+
 class ChatRequest(BaseModel):
     """Payload for /api/chat."""
 

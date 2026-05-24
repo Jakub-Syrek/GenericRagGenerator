@@ -91,6 +91,54 @@ class IndexCatalog:
         summaries.sort(key=lambda item: item.uploaded_at, reverse=True)
         return summaries
 
+    def list_projects(self) -> list[RepositorySummary]:
+        """Aggregate stored chunks into project-level summaries.
+
+        Re-uses `RepositorySummary` as the carrier type (same shape: id,
+        name, chunks, uploaded_at) — projects and repositories are two
+        upload flows over the same underlying notion of "collection".
+
+        @returns Projects sorted by upload time (newest first).
+        """
+        data = self._collection.get(include=[IncludeEnum.metadatas])
+        grouped = self._group_by(
+            (data.get("metadatas") or []),
+            key=lambda meta: meta.get("project_id"),
+            seed=lambda meta: {
+                "name": str(meta.get("project_name", "")),
+                "uploaded_at": meta.get("uploaded_at"),
+                "chunks": 0,
+            },
+        )
+        summaries = [
+            RepositorySummary(
+                repository_id=str(proj_id),
+                name=entry["name"],
+                chunks=entry["chunks"],
+                uploaded_at=datetime.fromisoformat(entry["uploaded_at"]),
+            )
+            for proj_id, entry in grouped.items()
+            if proj_id and entry.get("uploaded_at")
+        ]
+        summaries.sort(key=lambda item: item.uploaded_at, reverse=True)
+        return summaries
+
+    def list_project_chunks(self, project_id: str) -> list[ChunkRow]:
+        """Return every chunk belonging to one project.
+
+        @param project_id Project identifier.
+        @returns List of chunk rows (may be empty).
+        """
+        return self._fetch_rows({"project_id": project_id})
+
+    def delete_project(self, project_id: str) -> int:
+        """Remove every chunk of one project.
+
+        @param project_id Project identifier.
+        @returns Number of chunks removed.
+        """
+        return self._delete_where({"project_id": project_id})
+
     def list_repositories(self) -> list[RepositorySummary]:
         """Aggregate stored chunks into repository-level summaries.
 

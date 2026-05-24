@@ -670,6 +670,237 @@ class RagService:
         except Exception as exc:
             raise VectorStoreError(f"Failed to wipe index: {exc}") from exc
 
+    def ingest_project(self, *, project_name: str, files: list[tuple[str, bytes]]) -> RepositoryRecord:
+        """Index a multi-file project uploaded as one logical bundle.
+
+        Mirrors the repository pipeline but the source is a list of raw
+        `(filename, bytes)` tuples rather than a ZIP archive. Every file
+        shares the same `project_id` / `project_name` metadata.
+
+        @param project_name Human-readable project name.
+        @param files        Non-empty list of `(filename, payload_bytes)`.
+        @returns Record describing what was indexed / skipped.
+        @raises RepositoryError  When no usable files are found.
+        @raises EmbeddingError   When the underlying embedding call fails.
+        @raises StorageError     When archiving a raw upload fails.
+        """
+        if not files:
+            raise RepositoryError("Project upload must include at least one file.")
+        project_id = uuid.uuid4().hex
+        uploaded_at = datetime.now(UTC)
+        documents, skipped = self._build_project_documents(
+            files=files,
+            project_id=project_id,
+            project_name=project_name,
+            uploaded_at=uploaded_at,
+        )
+        if not documents:
+            raise RepositoryError("No usable files were found in the project upload.")
+        ingested = self._embed_repository_documents(documents)
+        self._persist_project_raw(project_id, files)
+        return RepositoryRecord(
+            id=project_id,
+            name=project_name,
+            files=ingested,
+            skipped=skipped,
+            uploaded_at=uploaded_at,
+        )
+
+    def _build_project_documents(
+        self,
+        *,
+        files: list[tuple[str, bytes]],
+        project_id: str,
+        project_name: str,
+        uploaded_at: datetime,
+    ) -> tuple[list[Document], list[SkippedFile]]:
+        """Run `_loader` over each project file and build `Document`s.
+
+        @param files        `(filename, bytes)` pairs.
+        @param project_id   Identifier shared by every chunk.
+        @param project_name Display name shared by every chunk.
+        @param uploaded_at  Timestamp baked into every document's metadata.
+        @returns Tuple of (documents to index, skipped-file records).
+        """
+        documents: list[Document] = []
+        skipped: list[SkippedFile] = []
+        for filename, payload in files:
+            try:
+                loaded = self._loader.load(filename, payload)
+            except UnsupportedFormatError:
+                skipped.append(SkippedFile(path=filename, reason="unsupported format"))
+                continue
+            if not loaded.text.strip():
+                skipped.append(SkippedFile(path=filename, reason="empty after extraction"))
+                continue
+            documents.append(
+                Document(
+                    id_=uuid.uuid4().hex,
+                    text=loaded.text,
+                    metadata={
+                        "filename": filename,
+                        "uploaded_at": uploaded_at.isoformat(),
+                        "kind": loaded.kind,
+                        "language": loaded.language,
+                        "project_id": project_id,
+                        "project_name": project_name,
+                    },
+                    excluded_embed_metadata_keys=[
+                        "uploaded_at",
+                        "kind",
+                        "language",
+                        "project_id",
+                        "project_name",
+                    ],
+                    excluded_llm_metadata_keys=["uploaded_at", "project_id"],
+                )
+            )
+        return documents, skipped
+
+    def _persist_project_raw(self, project_id: str, files: list[tuple[str, bytes]]) -> None:
+        """Archive every project file on disk under the project id.
+
+        @param project_id Project identifier (folder name).
+        @param files      `(filename, bytes)` pairs to persist.
+        @raises StorageError When the disk write fails.
+        """
+        try:
+            destination_dir = self._upload_dir / project_id
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            for filename, payload in files:
+                safe = Path(filename).name or "file"
+                (destination_dir / safe).write_bytes(payload)
+        except OSError as exc:
+            raise StorageError(f"Failed to archive raw project: {exc}") from exc
+
+    def list_projects(self) -> list[tuple[str, str, int, datetime]]:
+        """Aggregate stored chunks into project-level records.
+
+        @returns List of `(project_id, project_name, chunks, uploaded_at)`
+                 sorted by upload time (newest first).
+        @raises VectorStoreError On Chroma failures.
+        """
+        try:
+            summaries = self._catalog.list_projects()
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to list projects: {exc}") from exc
+        return [
+            (summary.repository_id, summary.name, summary.chunks, summary.uploaded_at)
+            for summary in summaries
+        ]
+
+    def get_project(self, project_id: str) -> RepositoryRecord | None:
+        """Return metadata + per-file ingest list for one project.
+
+        @param project_id Project identifier.
+        @returns Re-used `RepositoryRecord` shape, or `None`.
+        @raises VectorStoreError On Chroma failures.
+        """
+        try:
+            rows = self._catalog.list_project_chunks(project_id)
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to read project chunks: {exc}") from exc
+        if not rows:
+            return None
+        files = self._aggregate_repository_files_from_rows(rows)
+        head_meta = rows[0].metadata
+        return RepositoryRecord(
+            id=project_id,
+            name=str(head_meta.get("project_name", "")),
+            files=files,
+            skipped=[],
+            uploaded_at=datetime.fromisoformat(str(head_meta.get("uploaded_at"))),
+        )
+
+    def delete_project(self, project_id: str) -> int:
+        """Remove every chunk belonging to a project.
+
+        @param project_id Project identifier.
+        @returns Number of chunks deleted.
+        @raises VectorStoreError On Chroma failures.
+        """
+        try:
+            return self._catalog.delete_project(project_id)
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to delete project {project_id}: {exc}") from exc
+
+    async def query_once(
+        self,
+        *,
+        messages: list[dict],
+        document_ids: list[str] | None = None,
+        repository_ids: list[str] | None = None,
+        project_ids: list[str] | None = None,
+    ) -> tuple[str, list[ScoredChunkRecord]]:
+        """Return one fully-assembled answer + the ranked sources behind it.
+
+        Non-streaming wrapper that drains `stream_chat` and stitches the
+        chunks together for script-friendly consumers. Sources are
+        captured from the first `sources` event so callers see exactly
+        what the LLM was grounded on.
+
+        @param messages       Conversation so far (`role`/`content` dicts).
+        @param document_ids   Optional document scope.
+        @param repository_ids Optional repository scope.
+        @param project_ids    Optional project scope.
+        @returns Tuple of `(answer_text, scored_sources)`.
+        @raises EmbeddingError / ChatGenerationError / VectorStoreError On failure.
+        """
+        scoped_filters = (document_ids or []) + (repository_ids or []) + (project_ids or [])
+        nodes = await self._retrieve_for_query(
+            question=messages[-1].get("content", ""),
+            document_ids=document_ids,
+            repository_ids=repository_ids,
+            project_ids=project_ids,
+        )
+        prompt = self._build_prompt(messages, nodes)
+        parts: list[str] = []
+        try:
+            response = await self._llm.astream_chat(prompt)
+            async for chunk in response:
+                delta = getattr(chunk, "delta", "") or ""
+                if delta:
+                    parts.append(delta)
+        except Exception as exc:
+            raise ChatGenerationError(f"Chat generation failed: {exc}") from exc
+        scored = [self._scored_chunk_from_node(node) for node in nodes]
+        _ = scoped_filters
+        return "".join(parts), scored
+
+    async def _retrieve_for_query(
+        self,
+        *,
+        question: str,
+        document_ids: list[str] | None,
+        repository_ids: list[str] | None,
+        project_ids: list[str] | None,
+    ) -> list[NodeWithScore]:
+        """Retrieve top-k nodes constrained by every supplied filter (AND).
+
+        @param question       User question (already prefixed by the embedder).
+        @param document_ids   Optional document scope.
+        @param repository_ids Optional repository scope.
+        @param project_ids    Optional project scope.
+        @returns Ranked list of `NodeWithScore`.
+        @raises EmbeddingError On retrieval failures.
+        """
+        clauses: list[MetadataFilter] = []
+        if document_ids:
+            clauses.append(self._scalar_or_in("doc_id", document_ids))
+        if repository_ids:
+            clauses.append(self._scalar_or_in("repository_id", repository_ids))
+        if project_ids:
+            clauses.append(self._scalar_or_in("project_id", project_ids))
+        filters = MetadataFilters(filters=clauses) if clauses else None
+        retriever = self._index.as_retriever(
+            similarity_top_k=self._settings.top_k,
+            filters=filters,
+        )
+        try:
+            return await retriever.aretrieve(question)
+        except Exception as exc:
+            raise EmbeddingError(f"Retrieval failed: {exc}") from exc
+
     @staticmethod
     def _open_zip(payload: bytes) -> zipfile.ZipFile:
         """Open a ZIP archive from raw bytes.

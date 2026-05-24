@@ -13,7 +13,17 @@ from slowapi.middleware import SlowAPIMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .api import admin, auth, chat, documents, health, repository, search
+from .api import (
+    admin,
+    auth,
+    chat,
+    documents,
+    health,
+    projects,
+    query,
+    repository,
+    search,
+)
 from .config import get_settings
 from .security import SecurityHeadersMiddleware, limiter
 
@@ -57,7 +67,12 @@ def create_app() -> FastAPI:
                 "name": "repositories",
                 "description": "CRUD over uploaded ZIP repositories and their files.",
             },
+            {
+                "name": "projects",
+                "description": "CRUD over multi-source projects (many raw files in one upload).",
+            },
             {"name": "search", "description": "Retrieval-only similarity search (no LLM call)."},
+            {"name": "query", "description": "Synchronous RAG answer (non-streaming JSON)."},
             {"name": "chat", "description": "Streaming RAG answer (NDJSON), grounded in the index."},
         ],
         docs_url="/docs" if settings.docs_enabled else None,
@@ -83,7 +98,9 @@ def create_app() -> FastAPI:
     application.include_router(admin.router)
     application.include_router(documents.router)
     application.include_router(repository.router)
+    application.include_router(projects.router)
     application.include_router(search.router)
+    application.include_router(query.router)
     application.include_router(chat.router)
     _mount_frontend(application)
     return application
