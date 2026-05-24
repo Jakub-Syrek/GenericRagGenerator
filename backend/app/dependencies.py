@@ -12,6 +12,18 @@ from .services.document_loader import DocumentLoader
 from .services.rag_service import RagService
 
 
+def _document_loader(settings: Settings) -> DocumentLoader:
+    """Build a `DocumentLoader` honouring the sandbox settings.
+
+    @param settings Application settings.
+    @returns Configured loader (sandbox flag passed through).
+    """
+    return DocumentLoader(
+        sandbox_enabled=settings.parser_sandbox_enabled,
+        sandbox_timeout_seconds=settings.parser_sandbox_timeout_seconds,
+    )
+
+
 @lru_cache
 def _ollama_probe_client(host: str) -> Client:
     """Return a cached Ollama client used only for connectivity probing.
@@ -30,7 +42,7 @@ def _rag_service(_cache_key: str) -> RagService:
     @returns Memoized RAG service.
     """
     settings = get_settings()
-    return RagService(settings=settings, loader=DocumentLoader())
+    return RagService(settings=settings, loader=_document_loader(get_settings()))
 
 
 def get_document_loader() -> DocumentLoader:
@@ -38,7 +50,7 @@ def get_document_loader() -> DocumentLoader:
 
     @returns New loader instance.
     """
-    return DocumentLoader()
+    return _document_loader(get_settings())
 
 
 def get_rag_service(settings: Settings = Depends(get_settings)) -> RagService:

@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     reranker_top_k: int = 5
     reranker_cache_dir: Path | None = None
 
+    # Run PDF / DOCX / HTML parsers in a subprocess with a wall-clock
+    # timeout. A malformed payload that crashes pypdf or docx2txt then
+    # kills only that worker, not the API process.
+    parser_sandbox_enabled: bool = False
+    parser_sandbox_timeout_seconds: float = 10.0
+
     app_host: str = "127.0.0.1"
     app_port: int = 8000
 
