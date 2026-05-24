@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     rate_limit_chat: str = "30/minute"
     rate_limit_uploads: str = "10/minute"
 
+    auth_username: str = "admin"
+    auth_password: SecretStr | None = None
+    jwt_secret: SecretStr | None = None
+    jwt_expires_minutes: int = 60
+    docs_enabled: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .api import chat, documents, health, repository, search
+from .api import admin, auth, chat, documents, health, repository, search
 from .config import get_settings
 from .security import SecurityHeadersMiddleware, limiter
 
@@ -42,13 +42,27 @@ def create_app() -> FastAPI:
         openapi_tags=[
             {"name": "health", "description": "Liveness + Ollama reachability probe."},
             {
+                "name": "auth",
+                "description": "Credential login + JWT bearer issuance.",
+            },
+            {
+                "name": "admin",
+                "description": "Administrative operations (require the `admin` scope).",
+            },
+            {
                 "name": "documents",
                 "description": "CRUD over individually uploaded documents and their chunks.",
             },
-            {"name": "repositories", "description": "CRUD over uploaded ZIP repositories and their files."},
+            {
+                "name": "repositories",
+                "description": "CRUD over uploaded ZIP repositories and their files.",
+            },
             {"name": "search", "description": "Retrieval-only similarity search (no LLM call)."},
             {"name": "chat", "description": "Streaming RAG answer (NDJSON), grounded in the index."},
         ],
+        docs_url="/docs" if settings.docs_enabled else None,
+        redoc_url="/redoc" if settings.docs_enabled else None,
+        openapi_url="/openapi.json" if settings.docs_enabled else None,
     )
 
     application.state.limiter = limiter
@@ -65,6 +79,8 @@ def create_app() -> FastAPI:
     )
 
     application.include_router(health.router)
+    application.include_router(auth.router)
+    application.include_router(admin.router)
     application.include_router(documents.router)
     application.include_router(repository.router)
     application.include_router(search.router)
