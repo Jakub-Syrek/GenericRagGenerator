@@ -1,4 +1,5 @@
 """Quick end-to-end smoke test: upload a doc, ask a question, stream answer."""
+
 import json
 import sys
 import tempfile
@@ -25,13 +26,17 @@ def main() -> int:
     tmp = Path(tempfile.gettempdir()) / "rag_smoke.txt"
     tmp.write_text(SAMPLE, encoding="utf-8")
     with tmp.open("rb") as handle:
-        upload = requests.post(f"{BASE}/api/documents", files={"file": ("rag_smoke.txt", handle, "text/plain")}, timeout=120)
+        upload = requests.post(
+            f"{BASE}/api/documents", files={"file": ("rag_smoke.txt", handle, "text/plain")}, timeout=120
+        )
     print("UPLOAD:", upload.status_code, upload.json())
 
     docs = requests.get(f"{BASE}/api/documents", timeout=30).json()
     print("LIST:", docs)
 
-    payload = {"messages": [{"role": "user", "content": "Which embedding model does the project use by default?"}]}
+    payload = {
+        "messages": [{"role": "user", "content": "Which embedding model does the project use by default?"}]
+    }
     with requests.post(f"{BASE}/api/chat", json=payload, stream=True, timeout=120) as response:
         print("CHAT status:", response.status_code)
         full = ""
@@ -47,8 +52,6 @@ def main() -> int:
                 print("ERROR:", event["message"])
         print("ANSWER:", full)
 
-    if docs:
-        requests.delete(f"{BASE}/api/documents/{docs[0]['id']}", timeout=30)
     return 0
 
 

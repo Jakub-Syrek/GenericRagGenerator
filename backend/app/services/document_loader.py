@@ -1,4 +1,5 @@
 """Extract plain text from supported document formats."""
+
 from io import BytesIO
 from pathlib import Path
 

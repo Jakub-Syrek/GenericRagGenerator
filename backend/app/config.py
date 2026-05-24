@@ -1,4 +1,5 @@
 """Application settings loaded from environment / .env file."""
+
 from functools import lru_cache
 from pathlib import Path
 
