@@ -29,6 +29,7 @@ from llama_index.core.vector_stores import (
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.vector_stores.chroma import ChromaVectorStore
+from pydantic import Field
 
 from ..config import Settings
 from ..models.schemas import DocumentInfo
@@ -48,6 +49,66 @@ _ROLE_MAP: dict[str, MessageRole] = {
     "assistant": MessageRole.ASSISTANT,
     "system": MessageRole.SYSTEM,
 }
+
+
+class _PrefixedOllamaEmbedding(OllamaEmbedding):
+    """`OllamaEmbedding` subclass that prepends asymmetric task prefixes.
+
+    Models such as `nomic-embed-text` expect different prefixes on query vs
+    document inputs (`search_query: ` / `search_document: `). LlamaIndex's
+    stock client passes the raw text, so we wrap every embedding call here.
+    """
+
+    query_prefix: str = Field(default="", description="Prefix prepended to query inputs.")
+    document_prefix: str = Field(default="", description="Prefix prepended to document inputs.")
+
+    def _get_query_embedding(self, query: str) -> list[float]:
+        """Embed a single query with the configured prefix.
+
+        @param query Raw query text.
+        @returns Embedding vector.
+        """
+        return super()._get_query_embedding(f"{self.query_prefix}{query}")
+
+    async def _aget_query_embedding(self, query: str) -> list[float]:
+        """Async variant of `_get_query_embedding`.
+
+        @param query Raw query text.
+        @returns Embedding vector.
+        """
+        return await super()._aget_query_embedding(f"{self.query_prefix}{query}")
+
+    def _get_text_embedding(self, text: str) -> list[float]:
+        """Embed a single document chunk with the configured prefix.
+
+        @param text Raw document text.
+        @returns Embedding vector.
+        """
+        return super()._get_text_embedding(f"{self.document_prefix}{text}")
+
+    async def _aget_text_embedding(self, text: str) -> list[float]:
+        """Async variant of `_get_text_embedding`.
+
+        @param text Raw document text.
+        @returns Embedding vector.
+        """
+        return await super()._aget_text_embedding(f"{self.document_prefix}{text}")
+
+    def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of document chunks with the configured prefix.
+
+        @param texts Raw document texts.
+        @returns List of embedding vectors aligned with `texts`.
+        """
+        return super()._get_text_embeddings([f"{self.document_prefix}{text}" for text in texts])
+
+    async def _aget_text_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Async variant of `_get_text_embeddings`.
+
+        @param texts Raw document texts.
+        @returns List of embedding vectors aligned with `texts`.
+        """
+        return await super()._aget_text_embeddings([f"{self.document_prefix}{text}" for text in texts])
 
 
 class EmptyDocumentError(ValueError):
@@ -100,9 +161,11 @@ class RagService:
             raise VectorStoreError(f"Failed to open Chroma collection: {exc}") from exc
         vector_store = ChromaVectorStore(chroma_collection=self._collection)
 
-        self._embed_model = OllamaEmbedding(
+        self._embed_model = _PrefixedOllamaEmbedding(
             model_name=settings.embedding_model,
             base_url=settings.ollama_host,
+            query_prefix=settings.embedding_query_prefix,
+            document_prefix=settings.embedding_document_prefix,
         )
         self._llm = Ollama(
             model=settings.chat_model,
