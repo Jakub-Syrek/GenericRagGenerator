@@ -77,6 +77,8 @@ def service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RagService:
             pass
 
     instance._hybrid = _StubHybrid()
+    instance._search_cache = None
+    instance._query_cache = None
     return instance
 
 

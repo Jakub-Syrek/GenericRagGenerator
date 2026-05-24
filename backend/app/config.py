@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     #                      corpus rebuild on first query after writes.
     retrieval_mode: Literal["vector", "hybrid"] = "vector"
 
+    # In-memory LRU + TTL cache for /api/search and /api/query results.
+    # Cleared on every write; default off for predictability.
+    cache_enabled: bool = False
+    cache_max_entries: int = 256
+    cache_ttl_seconds: int = 300
+
     app_host: str = "127.0.0.1"
     app_port: int = 8000
 

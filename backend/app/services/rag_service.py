@@ -38,6 +38,7 @@ from .chunking import ChunkerRegistry, CodeChunker, MarkdownChunker, SentenceChu
 from .document_loader import DocumentLoader, Kind, UnsupportedFormatError
 from .hybrid_retrieval import HybridRetriever
 from .index_catalog import IndexCatalog
+from .query_cache import QueryCache, make_key
 
 COLLECTION_NAME = "documents"
 
@@ -289,6 +290,22 @@ class RagService:
             raise VectorStoreError(f"Failed to open Chroma collection: {exc}") from exc
         self._catalog = IndexCatalog(self._collection)
         self._hybrid = HybridRetriever(self._catalog)
+        self._search_cache: QueryCache[list[ScoredChunkRecord]] | None = (
+            QueryCache(
+                max_entries=settings.cache_max_entries,
+                ttl_seconds=settings.cache_ttl_seconds,
+            )
+            if settings.cache_enabled
+            else None
+        )
+        self._query_cache: QueryCache[tuple[str, list[ScoredChunkRecord]]] | None = (
+            QueryCache(
+                max_entries=settings.cache_max_entries,
+                ttl_seconds=settings.cache_ttl_seconds,
+            )
+            if settings.cache_enabled
+            else None
+        )
         vector_store = ChromaVectorStore(chroma_collection=self._collection)
 
         self._embed_model = _PrefixedOllamaEmbedding(
@@ -351,7 +368,7 @@ class RagService:
             self._index.insert_nodes(nodes)
         except Exception as exc:
             raise EmbeddingError(f"Failed to embed and store chunks: {exc}") from exc
-        self._hybrid.invalidate()
+        self._invalidate_retrieval_caches()
 
         try:
             self._persist_raw(document_id, filename, payload)
@@ -395,7 +412,7 @@ class RagService:
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete document {document_id}: {exc}") from exc
         if removed:
-            self._hybrid.invalidate()
+            self._invalidate_retrieval_caches()
         return removed
 
     def get_document(self, document_id: str) -> DocumentDetailRecord | None:
@@ -480,6 +497,13 @@ class RagService:
         @raises EmbeddingError On Ollama embedding failures.
         """
         limit = min(top_k or self._settings.top_k, 200)
+        cache_key = make_key(
+            "search", query, limit, document_ids, repository_ids, kinds, self._settings.retrieval_mode
+        )
+        if self._search_cache is not None:
+            cached = self._search_cache.get(cache_key)
+            if cached is not None:
+                return cached
         filters = self._compose_search_filters(document_ids, repository_ids, kinds)
         retriever = self._index.as_retriever(similarity_top_k=limit, filters=filters)
         try:
@@ -494,7 +518,21 @@ class RagService:
                 top_k=limit,
                 scope_predicate=self._scope_predicate(document_ids, repository_ids, kinds),
             )
+        if self._search_cache is not None:
+            self._search_cache.put(cache_key, scored)
         return scored
+
+    def _invalidate_retrieval_caches(self) -> None:
+        """Drop both the BM25 corpus and the response cache after any write.
+
+        Keeping them together as one call means we can't forget to clear
+        one and not the other when adding a new write path.
+        """
+        self._hybrid.invalidate()
+        if self._search_cache is not None:
+            self._search_cache.clear()
+        if self._query_cache is not None:
+            self._query_cache.clear()
 
     def _apply_hybrid_rerank(
         self,
@@ -737,7 +775,7 @@ class RagService:
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete repository {repository_id}: {exc}") from exc
         if removed:
-            self._hybrid.invalidate()
+            self._invalidate_retrieval_caches()
         return removed
 
     def wipe(self) -> int:
@@ -750,7 +788,7 @@ class RagService:
             removed = self._catalog.wipe()
         except Exception as exc:
             raise VectorStoreError(f"Failed to wipe index: {exc}") from exc
-        self._hybrid.invalidate()
+        self._invalidate_retrieval_caches()
         return removed
 
     def ingest_project(self, *, project_name: str, files: list[tuple[str, bytes]]) -> RepositoryRecord:
@@ -907,7 +945,7 @@ class RagService:
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete project {project_id}: {exc}") from exc
         if removed:
-            self._hybrid.invalidate()
+            self._invalidate_retrieval_caches()
         return removed
 
     async def query_once(
@@ -933,8 +971,16 @@ class RagService:
         @raises EmbeddingError / ChatGenerationError / VectorStoreError On failure.
         """
         scoped_filters = (document_ids or []) + (repository_ids or []) + (project_ids or [])
+        question = messages[-1].get("content", "")
+        cache_key = make_key(
+            "query", messages, document_ids, repository_ids, project_ids, self._settings.retrieval_mode
+        )
+        if self._query_cache is not None:
+            cached = self._query_cache.get(cache_key)
+            if cached is not None:
+                return cached
         nodes = await self._retrieve_for_query(
-            question=messages[-1].get("content", ""),
+            question=question,
             document_ids=document_ids,
             repository_ids=repository_ids,
             project_ids=project_ids,
@@ -951,7 +997,11 @@ class RagService:
             raise ChatGenerationError(f"Chat generation failed: {exc}") from exc
         scored = [self._scored_chunk_from_node(node) for node in nodes]
         _ = scoped_filters
-        return "".join(parts), scored
+        answer = "".join(parts)
+        result = (answer, scored)
+        if self._query_cache is not None:
+            self._query_cache.put(cache_key, result)
+        return result
 
     async def _retrieve_for_query(
         self,
@@ -1258,7 +1308,7 @@ class RagService:
             self._index.insert_nodes(all_nodes)
         except Exception as exc:
             raise EmbeddingError(f"Failed to embed repository chunks: {exc}") from exc
-        self._hybrid.invalidate()
+        self._invalidate_retrieval_caches()
         return files
 
     def _persist_raw_repository(self, repository_id: str, archive_name: str, payload: bytes) -> None:
