@@ -1,15 +1,15 @@
 """Streaming chat endpoint backed by the RAG service."""
 
-from __future__ import annotations
-
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
+from ..config import get_settings
 from ..dependencies import get_rag_service
 from ..models.schemas import ChatRequest
+from ..security import limiter, require_api_key
 from ..services.rag_service import (
     ChatGenerationError,
     EmbeddingError,
@@ -17,12 +17,20 @@ from ..services.rag_service import (
     VectorStoreError,
 )
 
-router = APIRouter(prefix="/api/chat", tags=["chat"])
+router = APIRouter(
+    prefix="/api/chat",
+    tags=["chat"],
+    dependencies=[Depends(require_api_key)],
+)
+
+_CHAT_LIMIT = get_settings().rate_limit_chat
 
 
 @router.post("")
+@limiter.limit(_CHAT_LIMIT)
 async def chat(
-    payload: ChatRequest,
+    request: Request,
+    payload: ChatRequest = Body(...),
     service: RagService = Depends(get_rag_service),
 ) -> StreamingResponse:
     """Stream a RAG answer as newline-delimited JSON events.

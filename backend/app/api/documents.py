@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 
 from ..dependencies import get_rag_service
 from ..models.schemas import DocumentInfo, UploadResponse
+from ..security import require_api_key
 from ..services.document_loader import UnsupportedFormatError
 from ..services.rag_service import (
     EmbeddingError,
@@ -15,13 +16,23 @@ from ..services.rag_service import (
     VectorStoreError,
 )
 
-router = APIRouter(prefix="/api/documents", tags=["documents"])
+router = APIRouter(
+    prefix="/api/documents",
+    tags=["documents"],
+    dependencies=[Depends(require_api_key)],
+)
 
 _MAX_BYTES = 25 * 1024 * 1024
+# NOTE: slowapi's @limiter.limit cannot wrap endpoints that take an UploadFile
+# parameter without breaking FastAPI's introspection. Upload throttling is
+# expected to happen at the reverse proxy (nginx limit_req, AWS WAF, etc.),
+# documented in SECURITY.md. The 25 MB cap below still prevents single-shot
+# abuse.
 
 
 @router.post("", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     service: RagService = Depends(get_rag_service),
 ) -> UploadResponse:

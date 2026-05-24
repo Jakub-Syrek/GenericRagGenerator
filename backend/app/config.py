@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +32,13 @@ class Settings(BaseSettings):
 
     app_host: str = "127.0.0.1"
     app_port: int = 8000
+
+    api_key: SecretStr | None = None
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:8000", "http://127.0.0.1:8000"]
+    )
+    rate_limit_chat: str = "30/minute"
+    rate_limit_uploads: str = "10/minute"
 
 
 @lru_cache

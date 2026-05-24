@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 
 from ..dependencies import get_rag_service
 from ..models.schemas import (
@@ -11,6 +11,7 @@ from ..models.schemas import (
     RepositoryUploadResponse,
     SkippedFileInfo,
 )
+from ..security import require_api_key
 from ..services.rag_service import (
     EmbeddingError,
     RagService,
@@ -21,9 +22,14 @@ from ..services.rag_service import (
     VectorStoreError,
 )
 
-router = APIRouter(prefix="/api/repositories", tags=["repositories"])
+router = APIRouter(
+    prefix="/api/repositories",
+    tags=["repositories"],
+    dependencies=[Depends(require_api_key)],
+)
 
 _MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
+# Upload throttling expected at the reverse proxy; see SECURITY.md.
 
 
 def _to_info(record: RepositoryRecord) -> RepositoryInfo:
@@ -54,6 +60,7 @@ def _to_info(record: RepositoryRecord) -> RepositoryInfo:
 
 @router.post("", response_model=RepositoryUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_repository(
+    request: Request,
     file: UploadFile = File(...),
     service: RagService = Depends(get_rag_service),
 ) -> RepositoryUploadResponse:
