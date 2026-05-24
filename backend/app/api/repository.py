@@ -13,6 +13,7 @@ from ..models.schemas import (
     SkippedFileInfo,
 )
 from ..security import require_api_key
+from ..security.auth import Principal, require_credentials
 from ..services.rag_service import (
     EmbeddingError,
     RagService,
@@ -31,6 +32,17 @@ router = APIRouter(
 
 _MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
 # Upload throttling expected at the reverse proxy; see SECURITY.md.
+
+
+def _owner_for(principal: Principal) -> str | None:
+    """Translate a principal into an ACL filter value.
+
+    @param principal Authenticated identity.
+    @returns Owner name to filter by, or `None` for unscoped access.
+    """
+    if principal.method == "none" or principal.has_scope("admin"):
+        return None
+    return principal.name
 
 
 def _to_info(record: RepositoryRecord) -> RepositoryInfo:
@@ -64,6 +76,7 @@ async def upload_repository(
     request: Request,
     file: UploadFile = File(...),
     service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
 ) -> RepositoryUploadResponse:
     """Index every supported file inside an uploaded ZIP archive.
 
@@ -86,7 +99,7 @@ async def upload_repository(
             f"Archive exceeds {_MAX_ARCHIVE_BYTES // (1024 * 1024)} MB limit.",
         )
     try:
-        record = service.ingest_repository(file.filename, payload)
+        record = service.ingest_repository(file.filename, payload, owner=_owner_for(principal))
     except UnsafeArchiveError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except RepositoryError as exc:
@@ -99,14 +112,18 @@ async def upload_repository(
 
 
 @router.get("", response_model=list[RepositoryInfo])
-def list_repositories(service: RagService = Depends(get_rag_service)) -> list[RepositoryInfo]:
+def list_repositories(
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> list[RepositoryInfo]:
     """List indexed repositories.
 
-    @param service Injected RAG service.
+    @param service   Injected RAG service.
+    @param principal Authenticated identity (ACL scope).
     @returns Repositories sorted from newest to oldest (chunks aggregated).
     """
     try:
-        rows = service.list_repositories()
+        rows = service.list_repositories(owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return [
@@ -124,16 +141,21 @@ def list_repositories(service: RagService = Depends(get_rag_service)) -> list[Re
 
 
 @router.get("/{repository_id}", response_model=RepositoryDetail)
-def get_repository(repository_id: str, service: RagService = Depends(get_rag_service)) -> RepositoryDetail:
+def get_repository(
+    repository_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> RepositoryDetail:
     """Return metadata + per-file ingest list for one repository.
 
     @param repository_id Repository identifier.
     @param service       Injected RAG service.
+    @param principal     Authenticated identity (ACL scope).
     @returns Detailed repository payload.
-    @raises HTTPException When the repository does not exist.
+    @raises HTTPException When the repository does not exist or is not yours.
     """
     try:
-        record = service.get_repository(repository_id)
+        record = service.get_repository(repository_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if record is None:
@@ -143,17 +165,20 @@ def get_repository(repository_id: str, service: RagService = Depends(get_rag_ser
 
 @router.get("/{repository_id}/files", response_model=list[IngestedFileInfo])
 def list_repository_files(
-    repository_id: str, service: RagService = Depends(get_rag_service)
+    repository_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
 ) -> list[IngestedFileInfo]:
     """List every file ingested from one repository.
 
     @param repository_id Repository identifier.
     @param service       Injected RAG service.
+    @param principal     Authenticated identity (ACL scope).
     @returns Per-file ingest list (sorted by path).
-    @raises HTTPException When the repository does not exist.
+    @raises HTTPException When the repository does not exist or is not yours.
     """
     try:
-        record = service.get_repository(repository_id)
+        record = service.get_repository(repository_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if record is None:
@@ -171,16 +196,21 @@ def list_repository_files(
 
 
 @router.delete("/{repository_id}")
-def delete_repository(repository_id: str, service: RagService = Depends(get_rag_service)) -> Response:
+def delete_repository(
+    repository_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> Response:
     """Remove every chunk belonging to one repository.
 
     @param repository_id Repository identifier.
     @param service       Injected RAG service.
+    @param principal     Authenticated identity (ACL scope).
     @returns 204 No Content on success.
-    @raises HTTPException When the repository does not exist.
+    @raises HTTPException When the repository does not exist or is not yours.
     """
     try:
-        removed = service.delete_repository(repository_id)
+        removed = service.delete_repository(repository_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if removed == 0:

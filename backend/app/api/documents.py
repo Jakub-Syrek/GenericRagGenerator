@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, 
 from ..dependencies import get_rag_service
 from ..models.schemas import ChunkInfo, DocumentDetail, DocumentInfo, UploadResponse
 from ..security import require_api_key
+from ..security.auth import Principal, require_credentials
 from ..services.document_loader import UnsupportedFormatError
 from ..services.rag_service import (
     ChunkRecord,
@@ -24,6 +25,22 @@ router = APIRouter(
     dependencies=[Depends(require_api_key)],
 )
 
+
+def _owner_for(principal: Principal) -> str | None:
+    """Translate a principal into an ACL filter value.
+
+    Admin scope (API key, JWT with admin) bypasses the filter — they
+    see every owner. Anonymous principals (no credentials configured)
+    also bypass: the deployment is effectively single-tenant.
+
+    @param principal Authenticated identity.
+    @returns Owner name to filter by, or `None` for unscoped access.
+    """
+    if principal.method == "none" or principal.has_scope("admin"):
+        return None
+    return principal.name
+
+
 _MAX_BYTES = 25 * 1024 * 1024
 # NOTE: slowapi's @limiter.limit cannot wrap endpoints that take an UploadFile
 # parameter without breaking FastAPI's introspection. Upload throttling is
@@ -37,11 +54,13 @@ async def upload_document(
     request: Request,
     file: UploadFile = File(...),
     service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
 ) -> UploadResponse:
     """Index a single uploaded document.
 
-    @param file    Multipart file payload.
-    @param service Injected RAG service.
+    @param file      Multipart file payload.
+    @param service   Injected RAG service.
+    @param principal Authenticated identity (drives the ACL owner stamp).
     @returns Metadata describing the indexed document.
     @raises HTTPException On unsupported, empty or oversized payloads.
     """
@@ -52,7 +71,7 @@ async def upload_document(
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File exceeds 25 MB limit.")
 
     try:
-        info, deduplicated = service.ingest(file.filename, payload)
+        info, deduplicated = service.ingest(file.filename, payload, owner=_owner_for(principal))
     except UnsupportedFormatError as exc:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(exc)) from exc
     except EmptyDocumentError as exc:
@@ -70,14 +89,18 @@ async def upload_document(
 
 
 @router.get("", response_model=list[DocumentInfo])
-def list_documents(service: RagService = Depends(get_rag_service)) -> list[DocumentInfo]:
+def list_documents(
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> list[DocumentInfo]:
     """List indexed documents.
 
-    @param service Injected RAG service.
+    @param service   Injected RAG service.
+    @param principal Authenticated identity (filters listing by owner).
     @returns Documents sorted from newest to oldest.
     """
     try:
-        records = service.list_documents()
+        records = service.list_documents(owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return [
@@ -92,16 +115,21 @@ def list_documents(service: RagService = Depends(get_rag_service)) -> list[Docum
 
 
 @router.get("/{document_id}", response_model=DocumentDetail)
-def get_document(document_id: str, service: RagService = Depends(get_rag_service)) -> DocumentDetail:
+def get_document(
+    document_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> DocumentDetail:
     """Return metadata + content preview for one indexed document.
 
     @param document_id Document identifier.
     @param service     Injected RAG service.
+    @param principal   Authenticated identity (ACL scope).
     @returns Document detail payload.
-    @raises HTTPException When the document does not exist.
+    @raises HTTPException When the document does not exist or is not yours.
     """
     try:
-        record = service.get_document(document_id)
+        record = service.get_document(document_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if record is None:
@@ -110,16 +138,21 @@ def get_document(document_id: str, service: RagService = Depends(get_rag_service
 
 
 @router.get("/{document_id}/chunks", response_model=list[ChunkInfo])
-def list_chunks(document_id: str, service: RagService = Depends(get_rag_service)) -> list[ChunkInfo]:
+def list_chunks(
+    document_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> list[ChunkInfo]:
     """List every chunk produced from one document, ordered by their stored index.
 
     @param document_id Document identifier.
     @param service     Injected RAG service.
+    @param principal   Authenticated identity (ACL scope).
     @returns Ordered list of chunk descriptors.
-    @raises HTTPException When the document does not exist.
+    @raises HTTPException When the document does not exist or is not yours.
     """
     try:
-        chunks = service.list_document_chunks(document_id)
+        chunks = service.list_document_chunks(document_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if not chunks:
@@ -128,16 +161,21 @@ def list_chunks(document_id: str, service: RagService = Depends(get_rag_service)
 
 
 @router.delete("/{document_id}")
-def delete_document(document_id: str, service: RagService = Depends(get_rag_service)) -> Response:
+def delete_document(
+    document_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> Response:
     """Remove every chunk belonging to one document.
 
     @param document_id Document identifier.
     @param service     Injected RAG service.
+    @param principal   Authenticated identity (ACL scope).
     @returns 204 No Content on success.
-    @raises HTTPException When the document does not exist.
+    @raises HTTPException When the document does not exist or is not yours.
     """
     try:
-        removed = service.delete(document_id)
+        removed = service.delete(document_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if removed == 0:

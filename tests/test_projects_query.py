@@ -26,8 +26,15 @@ class _ProjectsFakeService:
         self.stream_payload: list[dict] = []
         self.query_answer: str = "stub answer"
 
-    def ingest_project(self, *, project_name: str, files: list[tuple[str, bytes]]) -> RepositoryRecord:
+    def ingest_project(
+        self,
+        *,
+        project_name: str,
+        files: list[tuple[str, bytes]],
+        owner: str | None = None,
+    ) -> RepositoryRecord:
         """Build a synthetic project record from the supplied filenames."""
+        _ = owner
         project_id = f"proj-{len(self.records) + 1}"
         record = RepositoryRecord(
             id=project_id,
@@ -48,13 +55,13 @@ class _ProjectsFakeService:
         self.records[project_id] = record
         return record
 
-    def list_projects(self) -> list[tuple[str, str, int, datetime]]:
+    def list_projects(self, **_kwargs: object) -> list[tuple[str, str, int, datetime]]:
         return [(rec.id, rec.name, rec.total_chunks, rec.uploaded_at) for rec in self.records.values()]
 
-    def get_project(self, project_id: str) -> RepositoryRecord | None:
+    def get_project(self, project_id: str, **_kwargs: object) -> RepositoryRecord | None:
         return self.records.get(project_id)
 
-    def delete_project(self, project_id: str) -> int:
+    def delete_project(self, project_id: str, **_kwargs: object) -> int:
         record = self.records.pop(project_id, None)
         return record.total_chunks if record else 0
 
@@ -75,7 +82,7 @@ class _ProjectsFakeService:
 
     # Methods required because the existing /api/health and /api/documents
     # routes share the same dependency override; keep them stub-friendly.
-    def list_documents(self) -> list:
+    def list_documents(self, **_kwargs: object) -> list:
         return []
 
     async def stream_chat(self, **_kwargs: object) -> AsyncIterator[dict]:

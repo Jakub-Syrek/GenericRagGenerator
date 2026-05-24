@@ -387,21 +387,29 @@ class RagService:
             storage_context=storage_context,
         )
 
-    def ingest(self, filename: str, payload: bytes) -> tuple[DocumentInfo, bool]:
+    def ingest(
+        self,
+        filename: str,
+        payload: bytes,
+        *,
+        owner: str | None = None,
+    ) -> tuple[DocumentInfo, bool]:
         """Parse, chunk, embed and persist one uploaded file.
 
         Computes a SHA-256 of the raw payload first. If a document with
-        the same hash already exists, returns the existing record with
-        `deduplicated=True` instead of re-embedding — keeps Ollama
-        traffic down on repeated uploads of the same file.
+        the same hash already exists (within the same owner scope, when
+        set), returns the existing record with `deduplicated=True`
+        instead of re-embedding.
 
         @param filename Original file name (used for extension + metadata).
         @param payload  Raw bytes of the uploaded file.
+        @param owner    Optional principal name to stamp as the row owner;
+                        also scopes the dedup lookup.
         @returns Tuple of `(document_info, deduplicated)`.
         @raises EmptyDocumentError When the file yields no usable text.
         """
         content_hash = hashlib.sha256(payload).hexdigest()
-        existing = self._catalog.find_document_by_content_hash(content_hash)
+        existing = self._catalog.find_document_by_content_hash(content_hash, owner=owner)
         if existing is not None:
             return (
                 DocumentInfo(
@@ -419,18 +427,27 @@ class RagService:
 
         document_id = uuid.uuid4().hex
         uploaded_at = datetime.now(UTC)
+        metadata: dict[str, Any] = {
+            "filename": filename,
+            "uploaded_at": uploaded_at.isoformat(),
+            "kind": loaded.kind,
+            "language": loaded.language,
+            "content_hash": content_hash,
+        }
+        if owner:
+            metadata["owner"] = owner
         document = Document(
             id_=document_id,
             text=loaded.text,
-            metadata={
-                "filename": filename,
-                "uploaded_at": uploaded_at.isoformat(),
-                "kind": loaded.kind,
-                "language": loaded.language,
-                "content_hash": content_hash,
-            },
-            excluded_embed_metadata_keys=["uploaded_at", "kind", "language", "content_hash"],
-            excluded_llm_metadata_keys=["uploaded_at", "content_hash"],
+            metadata=metadata,
+            excluded_embed_metadata_keys=[
+                "uploaded_at",
+                "kind",
+                "language",
+                "content_hash",
+                "owner",
+            ],
+            excluded_llm_metadata_keys=["uploaded_at", "content_hash", "owner"],
         )
         nodes = self._split_document(document)
         if not nodes:
@@ -457,13 +474,14 @@ class RagService:
             False,
         )
 
-    def list_documents(self) -> list[DocumentRecord]:
+    def list_documents(self, *, owner: str | None = None) -> list[DocumentRecord]:
         """Aggregate stored chunks into document-level records.
 
+        @param owner Optional owner filter (`None` returns every document).
         @returns Document records sorted by upload time (newest first).
         """
         try:
-            summaries = self._catalog.list_documents()
+            summaries = self._catalog.list_documents(owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to list documents: {exc}") from exc
         return [
@@ -476,29 +494,37 @@ class RagService:
             for summary in summaries
         ]
 
-    def delete(self, document_id: str) -> int:
+    def delete(self, document_id: str, *, owner: str | None = None) -> int:
         """Remove every chunk belonging to a document.
 
         @param document_id Identifier of the document to remove.
+        @param owner       Optional owner scope; zero when not the owner.
         @returns Number of chunks deleted.
         """
         try:
-            removed = self._catalog.delete_document(document_id)
+            removed = self._catalog.delete_document(document_id, owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete document {document_id}: {exc}") from exc
         if removed:
             self._invalidate_retrieval_caches()
         return removed
 
-    def get_document(self, document_id: str) -> DocumentDetailRecord | None:
+    def get_document(
+        self,
+        document_id: str,
+        *,
+        owner: str | None = None,
+    ) -> DocumentDetailRecord | None:
         """Return metadata + a content preview for one indexed document.
 
         @param document_id Identifier of the document.
+        @param owner       Optional owner scope; returns `None` when the
+                           document exists but belongs to someone else.
         @returns `DocumentDetailRecord` or `None` when not found.
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            rows = self._catalog.list_document_chunks(document_id)
+            rows = self._catalog.list_document_chunks(document_id, owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to read chunks: {exc}") from exc
         if not rows:
@@ -516,28 +542,40 @@ class RagService:
             preview=rows[0].text[:480],
         )
 
-    def list_document_chunks(self, document_id: str) -> list[ChunkRecord]:
+    def list_document_chunks(
+        self,
+        document_id: str,
+        *,
+        owner: str | None = None,
+    ) -> list[ChunkRecord]:
         """Return every chunk of a document, ordered by their stored index.
 
         @param document_id Identifier of the document.
+        @param owner       Optional owner scope.
         @returns Ordered list of `ChunkRecord` (may be empty).
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            rows = self._catalog.list_document_chunks(document_id)
+            rows = self._catalog.list_document_chunks(document_id, owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to read chunks: {exc}") from exc
         return [self._row_to_chunk(row.chunk_id, row.metadata, row.text) for row in rows]
 
-    def get_repository(self, repository_id: str) -> RepositoryRecord | None:
+    def get_repository(
+        self,
+        repository_id: str,
+        *,
+        owner: str | None = None,
+    ) -> RepositoryRecord | None:
         """Return metadata + per-file ingest list for one indexed repository.
 
         @param repository_id Identifier of the repository.
+        @param owner         Optional owner scope.
         @returns `RepositoryRecord` or `None` when not found.
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            rows = self._catalog.list_repository_chunks(repository_id)
+            rows = self._catalog.list_repository_chunks(repository_id, owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to read chunks: {exc}") from exc
         if not rows:
@@ -827,11 +865,18 @@ class RagService:
             distance=float(1.0 - score),
         )
 
-    def ingest_repository(self, archive_name: str, payload: bytes) -> RepositoryRecord:
+    def ingest_repository(
+        self,
+        archive_name: str,
+        payload: bytes,
+        *,
+        owner: str | None = None,
+    ) -> RepositoryRecord:
         """Open a ZIP archive and index every supported file inside.
 
         @param archive_name Original archive file name (used for repository name).
         @param payload      Raw ZIP bytes.
+        @param owner        Optional principal name to stamp on each chunk.
         @returns Record describing what was indexed and skipped.
         @raises UnsafeArchiveError On path traversal, symlinks or oversize totals.
         @raises RepositoryError    When no usable files are found.
@@ -851,6 +896,7 @@ class RagService:
             uploaded_at=uploaded_at,
             repository_id=repository_id,
             repository_name=repository_name,
+            owner=owner,
         )
         if not documents:
             raise RepositoryError("No usable files were found in the archive.")
@@ -864,15 +910,20 @@ class RagService:
             uploaded_at=uploaded_at,
         )
 
-    def list_repositories(self) -> list[tuple[str, str, int, datetime]]:
+    def list_repositories(
+        self,
+        *,
+        owner: str | None = None,
+    ) -> list[tuple[str, str, int, datetime]]:
         """Aggregate stored chunks into repository-level records.
 
+        @param owner Optional owner filter (`None` returns every repo).
         @returns List of `(repository_id, repository_name, chunks, uploaded_at)`
                  sorted by upload time (newest first).
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            summaries = self._catalog.list_repositories()
+            summaries = self._catalog.list_repositories(owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to list repositories: {exc}") from exc
         return [
@@ -880,15 +931,21 @@ class RagService:
             for summary in summaries
         ]
 
-    def delete_repository(self, repository_id: str) -> int:
+    def delete_repository(
+        self,
+        repository_id: str,
+        *,
+        owner: str | None = None,
+    ) -> int:
         """Remove every chunk belonging to a repository.
 
         @param repository_id Identifier of the repository to remove.
+        @param owner         Optional owner scope; zero on mismatch.
         @returns Number of chunks deleted.
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            removed = self._catalog.delete_repository(repository_id)
+            removed = self._catalog.delete_repository(repository_id, owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete repository {repository_id}: {exc}") from exc
         if removed:
@@ -908,7 +965,13 @@ class RagService:
         self._invalidate_retrieval_caches()
         return removed
 
-    def ingest_project(self, *, project_name: str, files: list[tuple[str, bytes]]) -> RepositoryRecord:
+    def ingest_project(
+        self,
+        *,
+        project_name: str,
+        files: list[tuple[str, bytes]],
+        owner: str | None = None,
+    ) -> RepositoryRecord:
         """Index a multi-file project uploaded as one logical bundle.
 
         Mirrors the repository pipeline but the source is a list of raw
@@ -917,6 +980,7 @@ class RagService:
 
         @param project_name Human-readable project name.
         @param files        Non-empty list of `(filename, payload_bytes)`.
+        @param owner        Optional principal name to stamp on each chunk.
         @returns Record describing what was indexed / skipped.
         @raises RepositoryError  When no usable files are found.
         @raises EmbeddingError   When the underlying embedding call fails.
@@ -931,6 +995,7 @@ class RagService:
             project_id=project_id,
             project_name=project_name,
             uploaded_at=uploaded_at,
+            owner=owner,
         )
         if not documents:
             raise RepositoryError("No usable files were found in the project upload.")
@@ -951,6 +1016,7 @@ class RagService:
         project_id: str,
         project_name: str,
         uploaded_at: datetime,
+        owner: str | None = None,
     ) -> tuple[list[Document], list[SkippedFile]]:
         """Run `_loader` over each project file and build `Document`s.
 
@@ -958,6 +1024,7 @@ class RagService:
         @param project_id   Identifier shared by every chunk.
         @param project_name Display name shared by every chunk.
         @param uploaded_at  Timestamp baked into every document's metadata.
+        @param owner        Optional owner principal name (per-chunk ACL).
         @returns Tuple of (documents to index, skipped-file records).
         """
         documents: list[Document] = []
@@ -971,26 +1038,30 @@ class RagService:
             if not loaded.text.strip():
                 skipped.append(SkippedFile(path=filename, reason="empty after extraction"))
                 continue
+            metadata: dict[str, Any] = {
+                "filename": filename,
+                "uploaded_at": uploaded_at.isoformat(),
+                "kind": loaded.kind,
+                "language": loaded.language,
+                "project_id": project_id,
+                "project_name": project_name,
+            }
+            if owner:
+                metadata["owner"] = owner
             documents.append(
                 Document(
                     id_=uuid.uuid4().hex,
                     text=loaded.text,
-                    metadata={
-                        "filename": filename,
-                        "uploaded_at": uploaded_at.isoformat(),
-                        "kind": loaded.kind,
-                        "language": loaded.language,
-                        "project_id": project_id,
-                        "project_name": project_name,
-                    },
+                    metadata=metadata,
                     excluded_embed_metadata_keys=[
                         "uploaded_at",
                         "kind",
                         "language",
                         "project_id",
                         "project_name",
+                        "owner",
                     ],
-                    excluded_llm_metadata_keys=["uploaded_at", "project_id"],
+                    excluded_llm_metadata_keys=["uploaded_at", "project_id", "owner"],
                 )
             )
         return documents, skipped
@@ -1011,15 +1082,20 @@ class RagService:
         except OSError as exc:
             raise StorageError(f"Failed to archive raw project: {exc}") from exc
 
-    def list_projects(self) -> list[tuple[str, str, int, datetime]]:
+    def list_projects(
+        self,
+        *,
+        owner: str | None = None,
+    ) -> list[tuple[str, str, int, datetime]]:
         """Aggregate stored chunks into project-level records.
 
+        @param owner Optional owner filter.
         @returns List of `(project_id, project_name, chunks, uploaded_at)`
                  sorted by upload time (newest first).
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            summaries = self._catalog.list_projects()
+            summaries = self._catalog.list_projects(owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to list projects: {exc}") from exc
         return [
@@ -1027,15 +1103,21 @@ class RagService:
             for summary in summaries
         ]
 
-    def get_project(self, project_id: str) -> RepositoryRecord | None:
+    def get_project(
+        self,
+        project_id: str,
+        *,
+        owner: str | None = None,
+    ) -> RepositoryRecord | None:
         """Return metadata + per-file ingest list for one project.
 
         @param project_id Project identifier.
+        @param owner      Optional owner scope.
         @returns Re-used `RepositoryRecord` shape, or `None`.
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            rows = self._catalog.list_project_chunks(project_id)
+            rows = self._catalog.list_project_chunks(project_id, owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to read project chunks: {exc}") from exc
         if not rows:
@@ -1050,15 +1132,21 @@ class RagService:
             uploaded_at=datetime.fromisoformat(str(head_meta.get("uploaded_at"))),
         )
 
-    def delete_project(self, project_id: str) -> int:
+    def delete_project(
+        self,
+        project_id: str,
+        *,
+        owner: str | None = None,
+    ) -> int:
         """Remove every chunk belonging to a project.
 
         @param project_id Project identifier.
+        @param owner      Optional owner scope; zero on mismatch.
         @returns Number of chunks deleted.
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            removed = self._catalog.delete_project(project_id)
+            removed = self._catalog.delete_project(project_id, owner=owner)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete project {project_id}: {exc}") from exc
         if removed:
@@ -1279,6 +1367,7 @@ class RagService:
         uploaded_at: datetime,
         repository_id: str,
         repository_name: str,
+        owner: str | None = None,
     ) -> tuple[list[Document], list[SkippedFile]]:
         """Walk archive members and turn the safe, supported ones into Documents.
 
@@ -1310,6 +1399,7 @@ class RagService:
                 uploaded_at=uploaded_at,
                 repository_id=repository_id,
                 repository_name=repository_name,
+                owner=owner,
             )
             if isinstance(document_or_skip, SkippedFile):
                 skipped.append(document_or_skip)
@@ -1348,6 +1438,7 @@ class RagService:
         uploaded_at: datetime,
         repository_id: str,
         repository_name: str,
+        owner: str | None = None,
     ) -> Document | SkippedFile:
         """Decode one archive member and wrap it in a LlamaIndex `Document`.
 
@@ -1369,25 +1460,29 @@ class RagService:
             return SkippedFile(path=rel_path, reason="unsupported format")
         if not loaded.text.strip():
             return SkippedFile(path=rel_path, reason="empty after extraction")
+        metadata: dict[str, Any] = {
+            "filename": rel_path,
+            "uploaded_at": uploaded_at.isoformat(),
+            "kind": loaded.kind,
+            "language": loaded.language,
+            "repository_id": repository_id,
+            "repository_name": repository_name,
+        }
+        if owner:
+            metadata["owner"] = owner
         return Document(
             id_=uuid.uuid4().hex,
             text=loaded.text,
-            metadata={
-                "filename": rel_path,
-                "uploaded_at": uploaded_at.isoformat(),
-                "kind": loaded.kind,
-                "language": loaded.language,
-                "repository_id": repository_id,
-                "repository_name": repository_name,
-            },
+            metadata=metadata,
             excluded_embed_metadata_keys=[
                 "uploaded_at",
                 "kind",
                 "language",
                 "repository_id",
                 "repository_name",
+                "owner",
             ],
-            excluded_llm_metadata_keys=["uploaded_at", "repository_id"],
+            excluded_llm_metadata_keys=["uploaded_at", "repository_id", "owner"],
         )
 
     def _split_document(self, document: Document) -> list[BaseNode]:

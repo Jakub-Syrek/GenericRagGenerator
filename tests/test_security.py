@@ -34,7 +34,7 @@ def test_api_key_required_when_configured(monkeypatch: pytest.MonkeyPatch, clien
     try:
 
         class _Stub:
-            def list_documents(self):
+            def list_documents(self, **_kwargs):
                 return []
 
         app.dependency_overrides[get_rag_service] = lambda: _Stub()
@@ -58,7 +58,7 @@ def test_api_key_skipped_when_unset(monkeypatch: pytest.MonkeyPatch, client: Tes
     get_settings.cache_clear()
 
     class _Stub:
-        def list_documents(self):
+        def list_documents(self, **_kwargs):
             return []
 
     app.dependency_overrides[get_rag_service] = lambda: _Stub()

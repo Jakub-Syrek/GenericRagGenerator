@@ -13,6 +13,7 @@ from ..models.schemas import (
     SkippedFileInfo,
 )
 from ..security import require_api_key
+from ..security.auth import Principal, require_credentials
 from ..services.rag_service import (
     EmbeddingError,
     RagService,
@@ -30,6 +31,17 @@ router = APIRouter(
 
 _MAX_PROJECT_BYTES = 50 * 1024 * 1024
 _MAX_PROJECT_FILES = 100
+
+
+def _owner_for(principal: Principal) -> str | None:
+    """Translate a principal into an ACL filter value.
+
+    @param principal Authenticated identity.
+    @returns Owner name to filter by, or `None` for unscoped access.
+    """
+    if principal.method == "none" or principal.has_scope("admin"):
+        return None
+    return principal.name
 
 
 def _to_info(record: RepositoryRecord) -> ProjectInfo:
@@ -64,6 +76,7 @@ async def upload_project(
     name: str = Form(..., min_length=1, max_length=128),
     files: list[UploadFile] = File(..., description="Multiple files comprising the project."),
     service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
 ) -> ProjectUploadResponse:
     """Index every uploaded file under a single project identifier.
 
@@ -83,7 +96,11 @@ async def upload_project(
         )
     payloads = await _read_payloads(files)
     try:
-        record = service.ingest_project(project_name=name, files=payloads)
+        record = service.ingest_project(
+            project_name=name,
+            files=payloads,
+            owner=_owner_for(principal),
+        )
     except RepositoryError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     except (EmbeddingError, VectorStoreError) as exc:
@@ -116,14 +133,18 @@ async def _read_payloads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
 
 
 @router.get("", response_model=list[ProjectInfo])
-def list_projects(service: RagService = Depends(get_rag_service)) -> list[ProjectInfo]:
+def list_projects(
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> list[ProjectInfo]:
     """List indexed projects.
 
-    @param service Injected RAG service.
+    @param service   Injected RAG service.
+    @param principal Authenticated identity (ACL scope).
     @returns Projects sorted from newest to oldest (chunks aggregated).
     """
     try:
-        rows = service.list_projects()
+        rows = service.list_projects(owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return [
@@ -141,16 +162,21 @@ def list_projects(service: RagService = Depends(get_rag_service)) -> list[Projec
 
 
 @router.get("/{project_id}", response_model=ProjectDetail)
-def get_project(project_id: str, service: RagService = Depends(get_rag_service)) -> ProjectDetail:
+def get_project(
+    project_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> ProjectDetail:
     """Return metadata + per-file ingest list for one project.
 
     @param project_id Project identifier.
     @param service    Injected RAG service.
+    @param principal  Authenticated identity (ACL scope).
     @returns Detailed project payload.
-    @raises HTTPException When the project does not exist.
+    @raises HTTPException When the project does not exist or is not yours.
     """
     try:
-        record = service.get_project(project_id)
+        record = service.get_project(project_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if record is None:
@@ -160,17 +186,20 @@ def get_project(project_id: str, service: RagService = Depends(get_rag_service))
 
 @router.get("/{project_id}/files", response_model=list[IngestedFileInfo])
 def list_project_files(
-    project_id: str, service: RagService = Depends(get_rag_service)
+    project_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
 ) -> list[IngestedFileInfo]:
     """List every file ingested into one project.
 
     @param project_id Project identifier.
     @param service    Injected RAG service.
+    @param principal  Authenticated identity (ACL scope).
     @returns Per-file ingest list (sorted by path).
-    @raises HTTPException When the project does not exist.
+    @raises HTTPException When the project does not exist or is not yours.
     """
     try:
-        record = service.get_project(project_id)
+        record = service.get_project(project_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if record is None:
@@ -188,16 +217,21 @@ def list_project_files(
 
 
 @router.delete("/{project_id}")
-def delete_project(project_id: str, service: RagService = Depends(get_rag_service)) -> Response:
+def delete_project(
+    project_id: str,
+    service: RagService = Depends(get_rag_service),
+    principal: Principal = Depends(require_credentials),
+) -> Response:
     """Remove every chunk belonging to one project.
 
     @param project_id Project identifier.
     @param service    Injected RAG service.
+    @param principal  Authenticated identity (ACL scope).
     @returns 204 No Content on success.
-    @raises HTTPException When the project does not exist.
+    @raises HTTPException When the project does not exist or is not yours.
     """
     try:
-        removed = service.delete_project(project_id)
+        removed = service.delete_project(project_id, owner=_owner_for(principal))
     except VectorStoreError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if removed == 0:

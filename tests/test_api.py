@@ -38,7 +38,13 @@ class FakeRagService:
         self.stream_failure: Exception | None = None
         self._hashes: dict[str, str] = {}
 
-    def ingest(self, filename: str, payload: bytes) -> tuple[DocumentInfo, bool]:
+    def ingest(
+        self,
+        filename: str,
+        payload: bytes,
+        *,
+        owner: str | None = None,
+    ) -> tuple[DocumentInfo, bool]:
         """Pretend to ingest a document and return canned metadata.
 
         @param filename File name supplied by the API.
@@ -48,6 +54,7 @@ class FakeRagService:
         """
         if self.ingest_failure is not None:
             raise self.ingest_failure
+        _ = owner
         import hashlib as _hashlib
 
         content_hash = _hashlib.sha256(payload).hexdigest()
@@ -81,13 +88,13 @@ class FakeRagService:
             False,
         )
 
-    def list_documents(self) -> list[DocumentRecord]:
+    def list_documents(self, **_kwargs: object) -> list[DocumentRecord]:
         """Return the in-memory document records."""
         if self.list_failure is not None:
             raise self.list_failure
         return list(self.records.values())
 
-    def get_document(self, document_id: str) -> DocumentDetailRecord | None:
+    def get_document(self, document_id: str, **_kwargs: object) -> DocumentDetailRecord | None:
         """Return a synthetic detail record (or None) for a document."""
         if document_id not in self.records:
             return None
@@ -104,7 +111,7 @@ class FakeRagService:
             preview="preview text",
         )
 
-    def list_document_chunks(self, document_id: str) -> list[ChunkRecord]:
+    def list_document_chunks(self, document_id: str, **_kwargs: object) -> list[ChunkRecord]:
         """Return synthetic chunks for a known document, empty otherwise."""
         if document_id not in self.records:
             return []
@@ -124,12 +131,12 @@ class FakeRagService:
             for index in range(self.records[document_id].chunks)
         ]
 
-    def get_repository(self, repository_id: str) -> RepositoryRecord | None:
+    def get_repository(self, repository_id: str, **_kwargs: object) -> RepositoryRecord | None:
         """Return None — the fake does not maintain repository records."""
         _ = repository_id
         return None
 
-    def list_repositories(self) -> list[tuple[str, str, int, datetime]]:
+    def list_repositories(self, **_kwargs: object) -> list[tuple[str, str, int, datetime]]:
         """Return an empty repository list by default."""
         return []
 
@@ -152,7 +159,7 @@ class FakeRagService:
             hits.append(ScoredChunkRecord(chunk=chunk, score=0.42, distance=0.58))
         return hits
 
-    def delete(self, document_id: str) -> int:
+    def delete(self, document_id: str, **_kwargs: object) -> int:
         """Forget a document by id and report how many chunks were removed."""
         if self.delete_failure is not None:
             raise self.delete_failure

@@ -63,14 +63,17 @@ class IndexCatalog:
         """
         self._collection = collection
 
-    def list_documents(self) -> list[DocumentSummary]:
+    def list_documents(self, *, owner: str | None = None) -> list[DocumentSummary]:
         """Aggregate stored chunks into document-level summaries.
 
+        @param owner Optional owner filter; when set, rows whose
+                     `owner` metadata differs are skipped.
         @returns Documents sorted by upload time (newest first).
         """
         data = self._collection.get(include=[IncludeEnum.metadatas])
+        rows = self._filter_by_owner(data.get("metadatas") or [], owner)
         grouped = self._group_by(
-            (data.get("metadatas") or []),
+            rows,
             key=lambda meta: _doc_id(meta),
             seed=lambda meta: {
                 "filename": str(meta.get("filename", "")),
@@ -91,18 +94,21 @@ class IndexCatalog:
         summaries.sort(key=lambda item: item.uploaded_at, reverse=True)
         return summaries
 
-    def list_projects(self) -> list[RepositorySummary]:
+    def list_projects(self, *, owner: str | None = None) -> list[RepositorySummary]:
         """Aggregate stored chunks into project-level summaries.
 
         Re-uses `RepositorySummary` as the carrier type (same shape: id,
         name, chunks, uploaded_at) — projects and repositories are two
         upload flows over the same underlying notion of "collection".
 
+        @param owner Optional owner filter; rows whose `owner` metadata
+                     differs are skipped.
         @returns Projects sorted by upload time (newest first).
         """
         data = self._collection.get(include=[IncludeEnum.metadatas])
+        rows = self._filter_by_owner(data.get("metadatas") or [], owner)
         grouped = self._group_by(
-            (data.get("metadatas") or []),
+            rows,
             key=lambda meta: meta.get("project_id"),
             seed=lambda meta: {
                 "name": str(meta.get("project_name", "")),
@@ -123,30 +129,37 @@ class IndexCatalog:
         summaries.sort(key=lambda item: item.uploaded_at, reverse=True)
         return summaries
 
-    def list_project_chunks(self, project_id: str) -> list[ChunkRow]:
+    def list_project_chunks(self, project_id: str, *, owner: str | None = None) -> list[ChunkRow]:
         """Return every chunk belonging to one project.
 
         @param project_id Project identifier.
+        @param owner      Optional owner filter; chunks not owned by it
+                          are dropped (returns empty list if all dropped).
         @returns List of chunk rows (may be empty).
         """
-        return self._fetch_rows({"project_id": project_id})
+        return self._fetch_rows(self._owner_scoped({"project_id": project_id}, owner))
 
-    def delete_project(self, project_id: str) -> int:
+    def delete_project(self, project_id: str, *, owner: str | None = None) -> int:
         """Remove every chunk of one project.
 
         @param project_id Project identifier.
+        @param owner      Optional owner filter; only chunks owned by it
+                          are removed (zero when ownership mismatches).
         @returns Number of chunks removed.
         """
-        return self._delete_where({"project_id": project_id})
+        return self._delete_where(self._owner_scoped({"project_id": project_id}, owner))
 
-    def list_repositories(self) -> list[RepositorySummary]:
+    def list_repositories(self, *, owner: str | None = None) -> list[RepositorySummary]:
         """Aggregate stored chunks into repository-level summaries.
 
+        @param owner Optional owner filter; rows whose `owner` metadata
+                     differs are skipped.
         @returns Repositories sorted by upload time (newest first).
         """
         data = self._collection.get(include=[IncludeEnum.metadatas])
+        rows = self._filter_by_owner(data.get("metadatas") or [], owner)
         grouped = self._group_by(
-            (data.get("metadatas") or []),
+            rows,
             key=lambda meta: meta.get("repository_id"),
             seed=lambda meta: {
                 "name": str(meta.get("repository_name", "")),
@@ -167,39 +180,48 @@ class IndexCatalog:
         summaries.sort(key=lambda item: item.uploaded_at, reverse=True)
         return summaries
 
-    def list_document_chunks(self, document_id: str) -> list[ChunkRow]:
+    def list_document_chunks(self, document_id: str, *, owner: str | None = None) -> list[ChunkRow]:
         """Return every chunk belonging to one document, in storage order.
 
         @param document_id Document identifier.
+        @param owner       Optional owner filter; empty list if mismatched.
         @returns List of chunk rows (may be empty).
         """
-        return self._fetch_rows({"doc_id": document_id})
+        return self._fetch_rows(self._owner_scoped({"doc_id": document_id}, owner))
 
-    def list_repository_chunks(self, repository_id: str) -> list[ChunkRow]:
+    def list_repository_chunks(self, repository_id: str, *, owner: str | None = None) -> list[ChunkRow]:
         """Return every chunk belonging to one repository.
 
         @param repository_id Repository identifier.
+        @param owner         Optional owner filter; empty list if mismatched.
         @returns List of chunk rows (may be empty).
         """
-        return self._fetch_rows({"repository_id": repository_id})
+        return self._fetch_rows(self._owner_scoped({"repository_id": repository_id}, owner))
 
-    def delete_document(self, document_id: str) -> int:
+    def delete_document(self, document_id: str, *, owner: str | None = None) -> int:
         """Remove every chunk of one document.
 
         @param document_id Document identifier.
+        @param owner       Optional owner filter; zero when not the owner.
         @returns Number of chunks removed.
         """
-        return self._delete_where({"doc_id": document_id})
+        return self._delete_where(self._owner_scoped({"doc_id": document_id}, owner))
 
-    def delete_repository(self, repository_id: str) -> int:
+    def delete_repository(self, repository_id: str, *, owner: str | None = None) -> int:
         """Remove every chunk of one repository.
 
         @param repository_id Repository identifier.
+        @param owner         Optional owner filter; zero when not the owner.
         @returns Number of chunks removed.
         """
-        return self._delete_where({"repository_id": repository_id})
+        return self._delete_where(self._owner_scoped({"repository_id": repository_id}, owner))
 
-    def find_document_by_content_hash(self, content_hash: str) -> DocumentSummary | None:
+    def find_document_by_content_hash(
+        self,
+        content_hash: str,
+        *,
+        owner: str | None = None,
+    ) -> DocumentSummary | None:
         """Return the existing document with the given `content_hash`, if any.
 
         Used by the ingest path to skip re-embedding a payload that's
@@ -208,10 +230,12 @@ class IndexCatalog:
         it exists yet).
 
         @param content_hash SHA-256 hex digest of the raw payload bytes.
+        @param owner        Optional owner filter; treats other owners'
+                            uploads as invisible (no dedup hit).
         @returns `DocumentSummary` of the prior upload, or `None`.
         """
         data = self._collection.get(
-            where={"content_hash": content_hash},
+            where=self._owner_scoped({"content_hash": content_hash}, owner),
             include=[IncludeEnum.metadatas],
         )
         metadatas = data.get("metadatas") or []
@@ -288,6 +312,38 @@ class IndexCatalog:
             return 0
         self._collection.delete(ids=ids)
         return len(ids)
+
+    @staticmethod
+    def _owner_scoped(where: dict[str, Any], owner: str | None) -> dict[str, Any]:
+        """Add an `owner` clause to a Chroma `where` filter when set.
+
+        @param where Base `where` filter.
+        @param owner Owner principal name, or `None` for no scoping.
+        @returns The original dict (no copy) when `owner` is None,
+                 otherwise a new dict with `owner` appended.
+        """
+        if not owner:
+            return where
+        return {**where, "owner": owner}
+
+    @staticmethod
+    def _filter_by_owner(
+        rows: list[dict[str, Any]],
+        owner: str | None,
+    ) -> list[dict[str, Any]]:
+        """Drop rows that don't match the requested owner.
+
+        Used by aggregation methods that pull the whole collection and
+        group in Python (Chroma's `where` would force a second round-
+        trip per principal — cheaper to filter once here).
+
+        @param rows  Raw metadata rows.
+        @param owner Owner principal name, or `None` for no scoping.
+        @returns Filtered list (unchanged when `owner` is None).
+        """
+        if not owner:
+            return rows
+        return [meta for meta in rows if meta.get("owner") == owner]
 
     @staticmethod
     def _group_by(
