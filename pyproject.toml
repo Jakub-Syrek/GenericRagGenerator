@@ -46,6 +46,11 @@ quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
 
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "data", "eval", "frontend"]
+# B101: asserts in tests are intentional; we already exclude tests, this is belt-and-braces.
+skips = ["B101"]
+
 [tool.mypy]
 python_version = "3.11"
 warn_unused_ignores = true
