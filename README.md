@@ -1,6 +1,20 @@
 # GenericRagGenerator
 
 [![CI](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-40%20passed-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/tree/main/tests)
+[![eval](https://img.shields.io/badge/eval-24%2F24-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/blob/main/eval/sample-result.md)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Ollama](https://img.shields.io/badge/Ollama-local-000000?logo=ollama&logoColor=white)](https://ollama.com/)
+[![LlamaIndex](https://img.shields.io/badge/LlamaIndex-0.12-FB923C)](https://docs.llamaindex.ai/)
+[![ChromaDB](https://img.shields.io/badge/ChromaDB-embedded-FACC15)](https://www.trychroma.com/)
+[![Ruff](https://img.shields.io/badge/lint-ruff-d7ff64?logo=ruff&logoColor=black)](https://github.com/astral-sh/ruff)
+[![mypy](https://img.shields.io/badge/types-mypy-2A6DB2)](http://mypy-lang.org/)
+[![bandit](https://img.shields.io/badge/security-bandit-FFC107)](https://github.com/PyCQA/bandit)
+[![detect-secrets](https://img.shields.io/badge/secrets-detect--secrets-FF5722)](https://github.com/Yelp/detect-secrets)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://pre-commit.com/)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
+[![Windows service](https://img.shields.io/badge/Windows%20service-NSSM-0078D4?logo=windows&logoColor=white)](scripts/install-windows-service.ps1)
 
 Local Retrieval-Augmented Generation (RAG) service. Upload documents *or* a
 whole repository (code + docs), then chat with a local LLM that answers
