@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     embedding_query_prefix: str = "search_query: "
     embedding_document_prefix: str = "search_document: "
 
+    # Tenacity-driven retry on Ollama embedding calls. Ollama itself is
+    # tolerant but a model pull or a transient socket drop occasionally
+    # surfaces as `httpx.ReadTimeout` / `ConnectError`; the wrapper turns
+    # those into a short backoff loop rather than a 502 to the client.
+    ollama_retry_attempts: int = 3
+    ollama_retry_backoff_min_seconds: float = 1.0
+    ollama_retry_backoff_max_seconds: float = 8.0
+
     # "vector" (default) = dense embeddings only.
     # "hybrid"           = dense + BM25 lexical, fused via Reciprocal Rank
     #                      Fusion. Helps with rare-token queries (function

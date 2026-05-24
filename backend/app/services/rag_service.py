@@ -31,6 +31,13 @@ from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from pydantic import Field
+from tenacity import (
+    AsyncRetrying,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ..config import Settings
 from ..models.schemas import DocumentInfo
@@ -81,6 +88,22 @@ _ROLE_MAP: dict[str, MessageRole] = {
 }
 
 
+# Exception classes worth retrying on: network-layer hiccups against the
+# local Ollama. Everything else (programmer errors, malformed payloads)
+# bubbles out on the first attempt.
+try:
+    import httpx as _httpx
+
+    _TRANSIENT_OLLAMA_EXCEPTIONS: tuple[type[BaseException], ...] = (
+        _httpx.ConnectError,
+        _httpx.ReadTimeout,
+        _httpx.RemoteProtocolError,
+        TimeoutError,
+    )
+except ImportError:  # pragma: no cover - httpx is a hard dep, branch for safety
+    _TRANSIENT_OLLAMA_EXCEPTIONS = (TimeoutError,)
+
+
 def _optional_str(value: object) -> str | None:
     """Coerce a metadata value to a non-empty string or `None`.
 
@@ -93,63 +116,87 @@ def _optional_str(value: object) -> str | None:
 
 
 class _PrefixedOllamaEmbedding(OllamaEmbedding):
-    """`OllamaEmbedding` subclass that prepends asymmetric task prefixes.
+    """`OllamaEmbedding` subclass: asymmetric prefixes + retry/backoff.
 
-    Models such as `nomic-embed-text` expect different prefixes on query vs
-    document inputs (`search_query: ` / `search_document: `). LlamaIndex's
-    stock client passes the raw text, so we wrap every embedding call here.
+    - **Prefixes** — `nomic-embed-text` and friends expect different
+      prefixes on query vs document inputs (`search_query: ` /
+      `search_document: `). LlamaIndex's stock client passes raw text,
+      so every embedding call goes through us first.
+    - **Retry** — transient `ConnectError` / `ReadTimeout` (Ollama
+      restart, GPU swap, model pull) become a short tenacity-driven
+      backoff loop instead of bubbling out as 502s. The number of
+      attempts and the exponential window are config-driven.
     """
 
     query_prefix: str = Field(default="", description="Prefix prepended to query inputs.")
     document_prefix: str = Field(default="", description="Prefix prepended to document inputs.")
+    retry_attempts: int = Field(default=3, description="Total attempts (including the first).")
+    retry_backoff_min: float = Field(default=1.0, description="Initial backoff in seconds.")
+    retry_backoff_max: float = Field(default=8.0, description="Cap on backoff in seconds.")
+
+    def _retry_policy(self) -> dict:
+        """Compose the tenacity policy from the current settings.
+
+        @returns Kwargs ready for `Retrying(...)` / `AsyncRetrying(...)`.
+        """
+        return {
+            "stop": stop_after_attempt(max(1, self.retry_attempts)),
+            "wait": wait_exponential(multiplier=self.retry_backoff_min, max=self.retry_backoff_max),
+            "retry": retry_if_exception_type(_TRANSIENT_OLLAMA_EXCEPTIONS),
+            "reraise": True,
+        }
 
     def _get_query_embedding(self, query: str) -> list[float]:
-        """Embed a single query with the configured prefix.
+        """Embed one query, retrying transient Ollama errors.
 
         @param query Raw query text.
         @returns Embedding vector.
         """
-        return super()._get_query_embedding(f"{self.query_prefix}{query}")
+        prefixed = f"{self.query_prefix}{query}"
+        for attempt in Retrying(**self._retry_policy()):
+            with attempt:
+                return super()._get_query_embedding(prefixed)
+        return []  # pragma: no cover - reraise=True makes this unreachable
 
     async def _aget_query_embedding(self, query: str) -> list[float]:
-        """Async variant of `_get_query_embedding`.
-
-        @param query Raw query text.
-        @returns Embedding vector.
-        """
-        return await super()._aget_query_embedding(f"{self.query_prefix}{query}")
+        """Async variant of `_get_query_embedding`."""
+        prefixed = f"{self.query_prefix}{query}"
+        async for attempt in AsyncRetrying(**self._retry_policy()):
+            with attempt:
+                return await super()._aget_query_embedding(prefixed)
+        return []  # pragma: no cover
 
     def _get_text_embedding(self, text: str) -> list[float]:
-        """Embed a single document chunk with the configured prefix.
-
-        @param text Raw document text.
-        @returns Embedding vector.
-        """
-        return super()._get_text_embedding(f"{self.document_prefix}{text}")
+        """Embed one document chunk, retrying transient Ollama errors."""
+        prefixed = f"{self.document_prefix}{text}"
+        for attempt in Retrying(**self._retry_policy()):
+            with attempt:
+                return super()._get_text_embedding(prefixed)
+        return []  # pragma: no cover
 
     async def _aget_text_embedding(self, text: str) -> list[float]:
-        """Async variant of `_get_text_embedding`.
-
-        @param text Raw document text.
-        @returns Embedding vector.
-        """
-        return await super()._aget_text_embedding(f"{self.document_prefix}{text}")
+        """Async variant of `_get_text_embedding`."""
+        prefixed = f"{self.document_prefix}{text}"
+        async for attempt in AsyncRetrying(**self._retry_policy()):
+            with attempt:
+                return await super()._aget_text_embedding(prefixed)
+        return []  # pragma: no cover
 
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of document chunks with the configured prefix.
-
-        @param texts Raw document texts.
-        @returns List of embedding vectors aligned with `texts`.
-        """
-        return super()._get_text_embeddings([f"{self.document_prefix}{text}" for text in texts])
+        """Embed a batch of chunks, retrying transient Ollama errors."""
+        prefixed = [f"{self.document_prefix}{text}" for text in texts]
+        for attempt in Retrying(**self._retry_policy()):
+            with attempt:
+                return super()._get_text_embeddings(prefixed)
+        return []  # pragma: no cover
 
     async def _aget_text_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Async variant of `_get_text_embeddings`.
-
-        @param texts Raw document texts.
-        @returns List of embedding vectors aligned with `texts`.
-        """
-        return await super()._aget_text_embeddings([f"{self.document_prefix}{text}" for text in texts])
+        """Async variant of `_get_text_embeddings`."""
+        prefixed = [f"{self.document_prefix}{text}" for text in texts]
+        async for attempt in AsyncRetrying(**self._retry_policy()):
+            with attempt:
+                return await super()._aget_text_embeddings(prefixed)
+        return []  # pragma: no cover
 
 
 class EmptyDocumentError(ValueError):
@@ -313,6 +360,9 @@ class RagService:
             base_url=settings.ollama_host,
             query_prefix=settings.embedding_query_prefix,
             document_prefix=settings.embedding_document_prefix,
+            retry_attempts=settings.ollama_retry_attempts,
+            retry_backoff_min=settings.ollama_retry_backoff_min_seconds,
+            retry_backoff_max=settings.ollama_retry_backoff_max_seconds,
         )
         self._llm = Ollama(
             model=settings.chat_model,
