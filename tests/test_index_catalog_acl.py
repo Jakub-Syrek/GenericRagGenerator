@@ -113,6 +113,116 @@ def test_delete_document_refuses_other_owner() -> None:
     assert sorted(collection.deleted) == ["c-alice-1", "c-alice-2"]
 
 
+def _repo_rows() -> list[dict[str, Any]]:
+    """Build a two-owner repository corpus."""
+    when = _uploaded_at()
+    return [
+        {
+            "id": "r-alice-1",
+            "text": "alice repo chunk",
+            "meta": {
+                "doc_id": "doc-alice-1",
+                "filename": "src/main.py",
+                "uploaded_at": when,
+                "owner": "alice",
+                "repository_id": "repo-alice",
+                "repository_name": "alice-app",
+            },
+        },
+        {
+            "id": "r-bob-1",
+            "text": "bob repo chunk",
+            "meta": {
+                "doc_id": "doc-bob-1",
+                "filename": "src/main.py",
+                "uploaded_at": when,
+                "owner": "bob",
+                "repository_id": "repo-bob",
+                "repository_name": "bob-app",
+            },
+        },
+    ]
+
+
+def _project_rows() -> list[dict[str, Any]]:
+    """Build a two-owner project corpus."""
+    when = _uploaded_at()
+    return [
+        {
+            "id": "p-alice-1",
+            "text": "alice project chunk",
+            "meta": {
+                "doc_id": "doc-alice-p",
+                "filename": "notes.md",
+                "uploaded_at": when,
+                "owner": "alice",
+                "project_id": "proj-alice",
+                "project_name": "alice-project",
+            },
+        },
+        {
+            "id": "p-bob-1",
+            "text": "bob project chunk",
+            "meta": {
+                "doc_id": "doc-bob-p",
+                "filename": "notes.md",
+                "uploaded_at": when,
+                "owner": "bob",
+                "project_id": "proj-bob",
+                "project_name": "bob-project",
+            },
+        },
+    ]
+
+
+def test_list_repositories_filters_by_owner() -> None:
+    """Each owner sees only their own repositories."""
+    catalog = IndexCatalog(_FakeCollection(_repo_rows()))
+    assert {row.repository_id for row in catalog.list_repositories(owner="alice")} == {"repo-alice"}
+    assert {row.repository_id for row in catalog.list_repositories(owner="bob")} == {"repo-bob"}
+
+
+def test_list_repository_chunks_filters_by_owner() -> None:
+    """Foreign owners get an empty list even if the repository id is correct."""
+    catalog = IndexCatalog(_FakeCollection(_repo_rows()))
+    assert catalog.list_repository_chunks("repo-alice", owner="bob") == []
+    assert len(catalog.list_repository_chunks("repo-alice", owner="alice")) == 1
+
+
+def test_delete_repository_refuses_other_owner() -> None:
+    """Deleting under the wrong owner removes nothing."""
+    collection = _FakeCollection(_repo_rows())
+    catalog = IndexCatalog(collection)
+    assert catalog.delete_repository("repo-alice", owner="bob") == 0
+    assert collection.deleted == []
+    assert catalog.delete_repository("repo-alice", owner="alice") == 1
+    assert collection.deleted == ["r-alice-1"]
+
+
+def test_list_projects_filters_by_owner() -> None:
+    """Each owner sees only their own projects."""
+    catalog = IndexCatalog(_FakeCollection(_project_rows()))
+    assert {row.repository_id for row in catalog.list_projects(owner="alice")} == {"proj-alice"}
+    assert {row.repository_id for row in catalog.list_projects(owner="bob")} == {"proj-bob"}
+
+
+def test_list_project_chunks_filters_by_owner() -> None:
+    """Foreign owners get an empty list even if the project id is correct."""
+    catalog = IndexCatalog(_FakeCollection(_project_rows()))
+    assert catalog.list_project_chunks("proj-alice", owner="bob") == []
+    assert len(catalog.list_project_chunks("proj-alice", owner="alice")) == 1
+
+
+def test_delete_project_refuses_other_owner() -> None:
+    """Deleting under the wrong owner removes nothing."""
+    collection = _FakeCollection(_project_rows())
+    catalog = IndexCatalog(collection)
+    assert catalog.delete_project("proj-alice", owner="bob") == 0
+    assert collection.deleted == []
+    assert catalog.delete_project("proj-alice", owner="alice") == 1
+    assert collection.deleted == ["p-alice-1"]
+
+
 def test_find_document_by_content_hash_scopes_dedup_per_owner() -> None:
     """The same payload uploaded by two owners produces two distinct docs."""
     when = _uploaded_at()

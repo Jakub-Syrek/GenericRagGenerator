@@ -7,7 +7,7 @@
 [![YOUR DATA STAYS HERE](https://img.shields.io/badge/your%20data-stays%20on%20your%20box-7C3AED?style=for-the-badge&logo=lock&logoColor=white)](#)
 
 [![CI](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-60%20passed-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/tree/main/tests)
+[![tests](https://img.shields.io/badge/tests-115%20passed-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/tree/main/tests)
 [![eval](https://img.shields.io/badge/eval-24%2F24-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/blob/main/eval/sample-result.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -279,35 +279,31 @@ A few extractions earn their keep — the rest is plain FastAPI / Pydantic
 | `services/rag_service.py`       | Composition root. Handlers depend on the facade, never on the underlying LlamaIndex/Chroma/Ollama trio. |
 | `security/_PrefixedOllamaEmbedding` | nomic-embed-text needs `search_query:` / `search_document:` prefixes; this is the only class that knows that. |
 
-## Known limitations
+## Optional retrieval features
 
-This is a focused single-tenant RAG service, not a production search
-platform. Concretely missing, in rough order of impact:
+All off by default — flip the env knob to opt in. Every toggle keeps
+the dense-only single-process default path untouched on `false`.
 
-- **No reranker.** Top-k from the embedder goes straight into the
-  prompt. A cross-encoder (e.g. `bge-reranker-v2-m3`) on top of the
-  retriever would lift precision a lot.
-- **No hybrid search.** Pure embedding similarity — no BM25, no
-  keyword/lexical fallback. Queries with rare identifiers (function
-  names, error codes) suffer.
-- **No semantic / query cache.** Identical questions re-embed and
-  re-prompt every time.
-- **No incremental indexing.** Re-uploading a changed document
-  re-embeds from scratch; there is no diff-based update path.
-- **No ACL / multi-user permissions.** Anyone with the API key (or
-  bearer) sees every document. Multi-tenant deployments need a
-  reverse-proxy enforcing per-user scopes.
-- **Parser sandboxing.** PDF / DOCX / HTML are parsed in-process; a
-  malicious payload that crashes `pypdf` or `python-docx` crashes the
-  worker. A separate subprocess (`subprocess.run` with `nsjail` /
-  `firejail`, or a sidecar container) would isolate that blast
-  radius.
-- **Embeddings batching.** `index.insert_nodes` already batches, but
-  there's no rate-limit-aware retry on the Ollama call. A sustained
-  burst will surface as 502s rather than backoff.
+| Flag                             | Default | What it adds                                                                                                            |
+|----------------------------------|---------|--------------------------------------------------------------------------------------------------------------------------|
+| `RETRIEVAL_MODE=hybrid`          | `vector`| BM25 lexical pass fused with the dense hits via Reciprocal Rank Fusion. Helps with rare-token queries (function names, error codes). |
+| `CACHE_ENABLED=true`             | `false` | LRU + TTL response cache on `/api/search` and `/api/query`. Auto-invalidated on every ingest / delete / wipe.            |
+| `RERANKER_ENABLED=true`          | `false` | FlashRank ONNX cross-encoder (~80 MB, one-time download) reorders the shortlist after retrieval.                         |
+| `PARSER_SANDBOX_ENABLED=true`    | `false` | PDF / DOCX / HTML parsers run in a subprocess with a wall-clock timeout. A malformed payload crashes only the worker.    |
+| `OLLAMA_RETRY_*`                 | on      | Tenacity-driven exponential backoff on transient Ollama errors (`ConnectError`, `ReadTimeout`, `RemoteProtocolError`).   |
 
-These are intentionally out of scope for v0.x — most of them are
-real engineering work, not a flag flip.
+Other shipped capabilities (always on, no flag needed):
+
+- **Content-hash dedup on ingest.** Every upload is keyed by SHA-256
+  of the raw payload; re-uploading identical bytes short-circuits
+  before the Ollama embedding call and returns the prior record with
+  `deduplicated=true` in the response.
+- **Per-principal ACL.** When `API_KEY` / `JWT_SECRET` is configured,
+  every chunk is stamped with the uploader's principal name. Read,
+  list and delete paths are owner-scoped so JWT users only see their
+  own documents / repositories / projects. The static API key and
+  any JWT carrying the `admin` scope bypass the filter. Anonymous
+  mode (no credentials configured) stays single-tenant.
 
 The chat stream emits one JSON event per line:
 - `{"type": "sources", "sources": [...]}` once at the top, where each
@@ -416,6 +412,18 @@ CI and live in `smoke_test.py` plus the `eval/` package.
 | `JWT_SECRET`                | *(unset)*                     | HS256 signing secret for issued JWT bearers. Required to enable login. |
 | `JWT_EXPIRES_MINUTES`       | `60`                          | Lifetime of issued bearer tokens.                           |
 | `DOCS_ENABLED`              | `true`                        | Set to `false` to hide `/docs`, `/redoc` and `/openapi.json` in prod. |
+| `RETRIEVAL_MODE`            | `vector`                      | `vector` (dense only) or `hybrid` (dense + BM25 fused via RRF).        |
+| `CACHE_ENABLED`             | `false`                       | LRU+TTL response cache for `/api/search` and `/api/query`.             |
+| `CACHE_MAX_ENTRIES`         | `256`                         | Max cached responses before LRU eviction.                              |
+| `CACHE_TTL_SECONDS`         | `300`                         | TTL on cached responses (seconds).                                     |
+| `RERANKER_ENABLED`          | `false`                       | Run a FlashRank cross-encoder on the retrieved shortlist.              |
+| `RERANKER_MODEL`            | `ms-marco-MiniLM-L-12-v2`     | FlashRank ONNX model name.                                             |
+| `RERANKER_TOP_K`            | `5`                           | Number of hits kept after reranking.                                   |
+| `PARSER_SANDBOX_ENABLED`    | `false`                       | Run PDF / DOCX / HTML parsers in a subprocess sandbox.                 |
+| `PARSER_SANDBOX_TIMEOUT_SECONDS` | `10.0`                   | Wall-clock limit per sandboxed parse before it's killed.               |
+| `OLLAMA_RETRY_ATTEMPTS`     | `3`                           | Total attempts (including the first) on transient Ollama errors.       |
+| `OLLAMA_RETRY_BACKOFF_MIN_SECONDS` | `1.0`                  | Initial exponential backoff window.                                    |
+| `OLLAMA_RETRY_BACKOFF_MAX_SECONDS` | `8.0`                  | Cap on exponential backoff window.                                     |
 
 ## Security
 
