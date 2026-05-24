@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GenericRagGenerator</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>GenericRagGenerator</h1>
+    <span id="health-pill" class="pill pill--unknown" aria-live="polite">checking…</span>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="card">
+        <h2>Documents</h2>
+        <form id="upload-form" class="upload">
+          <label class="upload__label" for="file-input">
+            Drop a PDF / TXT / Markdown file
+          </label>
+          <input id="file-input" type="file" accept=".pdf,.txt,.md,.markdown" />
+          <button id="upload-btn" type="submit">Upload &amp; index</button>
+          <p id="upload-status" class="status" role="status"></p>
+        </form>
+        <ul id="document-list" class="documents" aria-label="Indexed documents"></ul>
+      </section>
+    </aside>
+
+    <section class="chat-pane">
+      <ol id="chat-log" class="chat-log" aria-live="polite"></ol>
+      <form id="chat-form" class="chat-form">
+        <textarea
+          id="chat-input"
+          rows="3"
+          placeholder="Ask something about your documents…"
+          required
+        ></textarea>
+        <button id="chat-send" type="submit">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
