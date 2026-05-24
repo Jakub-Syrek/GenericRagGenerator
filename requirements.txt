@@ -7,6 +7,8 @@ pydantic-settings==2.7.0
 chromadb==0.5.23
 ollama==0.4.4
 pypdf==5.1.0
+beautifulsoup4==4.12.3
+docx2txt==0.9
 
 llama-index-core==0.12.10
 llama-index-llms-ollama==0.5.0

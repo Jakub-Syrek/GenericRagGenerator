@@ -192,20 +192,22 @@ class RagService:
         @returns Metadata describing the freshly indexed document.
         @raises EmptyDocumentError When the file yields no usable text.
         """
-        text = self._loader.load(filename, payload)
-        if not text:
+        loaded = self._loader.load(filename, payload)
+        if not loaded.text:
             raise EmptyDocumentError("No text could be extracted from the file.")
 
         document_id = uuid.uuid4().hex
         uploaded_at = datetime.now(UTC)
         document = Document(
             id_=document_id,
-            text=text,
+            text=loaded.text,
             metadata={
                 "filename": filename,
                 "uploaded_at": uploaded_at.isoformat(),
+                "kind": loaded.kind,
+                "language": loaded.language,
             },
-            excluded_embed_metadata_keys=["uploaded_at"],
+            excluded_embed_metadata_keys=["uploaded_at", "kind", "language"],
             excluded_llm_metadata_keys=["uploaded_at"],
         )
         nodes = self._splitter.get_nodes_from_documents([document])
