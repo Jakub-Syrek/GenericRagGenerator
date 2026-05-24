@@ -13,9 +13,13 @@ from app.main import app
 from app.models.schemas import DocumentInfo
 from app.services.document_loader import UnsupportedFormatError
 from app.services.rag_service import (
+    ChunkRecord,
+    DocumentDetailRecord,
     DocumentRecord,
     EmbeddingError,
     EmptyDocumentError,
+    RepositoryRecord,
+    ScoredChunkRecord,
     StorageError,
     VectorStoreError,
 )
@@ -63,6 +67,71 @@ class FakeRagService:
         if self.list_failure is not None:
             raise self.list_failure
         return list(self.records.values())
+
+    def get_document(self, document_id: str) -> DocumentDetailRecord | None:
+        """Return a synthetic detail record (or None) for a document."""
+        if document_id not in self.records:
+            return None
+        rec = self.records[document_id]
+        return DocumentDetailRecord(
+            id=rec.id,
+            filename=rec.filename,
+            chunks=rec.chunks,
+            uploaded_at=rec.uploaded_at,
+            kind="doc",
+            language="text",
+            repository_id=None,
+            repository_name=None,
+            preview="preview text",
+        )
+
+    def list_document_chunks(self, document_id: str) -> list[ChunkRecord]:
+        """Return synthetic chunks for a known document, empty otherwise."""
+        if document_id not in self.records:
+            return []
+        return [
+            ChunkRecord(
+                chunk_id=f"{document_id}:{index}",
+                document_id=document_id,
+                filename=self.records[document_id].filename,
+                kind="doc",
+                language="text",
+                repository_id=None,
+                repository_name=None,
+                line_start=None,
+                line_end=None,
+                preview=f"chunk-{index} preview",
+            )
+            for index in range(self.records[document_id].chunks)
+        ]
+
+    def get_repository(self, repository_id: str) -> RepositoryRecord | None:
+        """Return None — the fake does not maintain repository records."""
+        _ = repository_id
+        return None
+
+    def list_repositories(self) -> list[tuple[str, str, int, datetime]]:
+        """Return an empty repository list by default."""
+        return []
+
+    def search(self, **_kwargs: object) -> list[ScoredChunkRecord]:
+        """Return synthetic search hits derived from the stored documents."""
+        hits: list[ScoredChunkRecord] = []
+        for record in self.records.values():
+            chunk = ChunkRecord(
+                chunk_id=f"{record.id}:0",
+                document_id=record.id,
+                filename=record.filename,
+                kind="doc",
+                language="text",
+                repository_id=None,
+                repository_name=None,
+                line_start=None,
+                line_end=None,
+                preview="snippet",
+            )
+            hits.append(ScoredChunkRecord(chunk=chunk, score=0.42, distance=0.58))
+        return hits
 
     def delete(self, document_id: str) -> int:
         """Forget a document by id and report how many chunks were removed."""
@@ -230,6 +299,72 @@ def test_chat_emits_error_event_on_embedding_failure(
     events = [eval_line(line) for line in response.text.splitlines() if line.strip()]
     assert events[-1]["type"] == "error"
     assert "retrieval boom" in events[-1]["message"]
+
+
+def test_get_document_detail_returns_404_for_unknown(client: TestClient) -> None:
+    """Unknown document id surfaces a 404 from /api/documents/{id}."""
+    response = client.get("/api/documents/missing")
+    assert response.status_code == 404
+
+
+def test_get_document_detail_returns_payload(client: TestClient, fake_service: FakeRagService) -> None:
+    """An ingested document is retrievable with its kind / language / preview."""
+    _ = fake_service
+    upload = client.post(
+        "/api/documents",
+        files={"file": ("notes.txt", b"hello", "text/plain")},
+    ).json()
+    document_id = upload["document"]["id"]
+    detail = client.get(f"/api/documents/{document_id}").json()
+    assert detail["id"] == document_id
+    assert detail["kind"] == "doc"
+    assert detail["language"] == "text"
+    assert detail["preview"]
+
+
+def test_list_document_chunks_returns_one_per_chunk(client: TestClient, fake_service: FakeRagService) -> None:
+    """The chunks endpoint returns one descriptor per stored chunk."""
+    _ = fake_service
+    upload = client.post(
+        "/api/documents",
+        files={"file": ("notes.txt", b"x" * 300, "text/plain")},
+    ).json()
+    chunks = client.get(f"/api/documents/{upload['document']['id']}/chunks").json()
+    assert len(chunks) == upload["document"]["chunks"]
+    assert all(item["preview"] for item in chunks)
+
+
+def test_get_repository_returns_404_when_missing(client: TestClient) -> None:
+    """Unknown repository id returns 404."""
+    response = client.get("/api/repositories/missing")
+    assert response.status_code == 404
+
+
+def test_list_repository_files_returns_404_when_missing(client: TestClient) -> None:
+    """Unknown repository id on /files also returns 404."""
+    response = client.get("/api/repositories/missing/files")
+    assert response.status_code == 404
+
+
+def test_search_returns_scored_hits(client: TestClient, fake_service: FakeRagService) -> None:
+    """/api/search returns scored chunks for ingested documents."""
+    _ = fake_service
+    client.post(
+        "/api/documents",
+        files={"file": ("notes.txt", b"hello world", "text/plain")},
+    )
+    response = client.post("/api/search", json={"query": "hello"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == len(body["results"])
+    assert body["results"][0]["score"] == 0.42
+    assert body["results"][0]["filename"] == "notes.txt"
+
+
+def test_search_rejects_empty_query(client: TestClient) -> None:
+    """Empty query strings are rejected at the schema layer."""
+    response = client.post("/api/search", json={"query": ""})
+    assert response.status_code == 422
 
 
 def eval_line(line: str) -> dict:

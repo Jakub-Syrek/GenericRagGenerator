@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, 
 from ..dependencies import get_rag_service
 from ..models.schemas import (
     IngestedFileInfo,
+    RepositoryDetail,
     RepositoryInfo,
     RepositoryUploadResponse,
     SkippedFileInfo,
@@ -119,6 +120,53 @@ def list_repositories(service: RagService = Depends(get_rag_service)) -> list[Re
             uploaded_at=uploaded_at,
         )
         for repo_id, name, chunks, uploaded_at in rows
+    ]
+
+
+@router.get("/{repository_id}", response_model=RepositoryDetail)
+def get_repository(repository_id: str, service: RagService = Depends(get_rag_service)) -> RepositoryDetail:
+    """Return metadata + per-file ingest list for one repository.
+
+    @param repository_id Repository identifier.
+    @param service       Injected RAG service.
+    @returns Detailed repository payload.
+    @raises HTTPException When the repository does not exist.
+    """
+    try:
+        record = service.get_repository(repository_id)
+    except VectorStoreError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Repository not found.")
+    return RepositoryDetail(**_to_info(record).model_dump())
+
+
+@router.get("/{repository_id}/files", response_model=list[IngestedFileInfo])
+def list_repository_files(
+    repository_id: str, service: RagService = Depends(get_rag_service)
+) -> list[IngestedFileInfo]:
+    """List every file ingested from one repository.
+
+    @param repository_id Repository identifier.
+    @param service       Injected RAG service.
+    @returns Per-file ingest list (sorted by path).
+    @raises HTTPException When the repository does not exist.
+    """
+    try:
+        record = service.get_repository(repository_id)
+    except VectorStoreError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Repository not found.")
+    return [
+        IngestedFileInfo(
+            document_id=file.document_id,
+            path=file.path,
+            kind=file.kind,
+            language=file.language,
+            chunks=file.chunks,
+        )
+        for file in record.files
     ]
 
 

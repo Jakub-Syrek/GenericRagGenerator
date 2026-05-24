@@ -65,6 +65,60 @@ class RepositoryUploadResponse(BaseModel):
     message: str = "Repository indexed successfully."
 
 
+class ChunkInfo(BaseModel):
+    """One indexed chunk with its source metadata."""
+
+    chunk_id: str
+    document_id: str
+    filename: str
+    kind: Literal["doc", "code"]
+    language: str
+    repository_id: str | None = None
+    repository_name: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    preview: str
+
+
+class SearchHit(ChunkInfo):
+    """A `ChunkInfo` augmented with a similarity score."""
+
+    score: float
+    distance: float
+
+
+class DocumentDetail(DocumentInfo):
+    """Document descriptor with the first-chunk preview baked in."""
+
+    kind: Literal["doc", "code"]
+    language: str
+    repository_id: str | None = None
+    repository_name: str | None = None
+    preview: str
+
+
+class RepositoryDetail(RepositoryInfo):
+    """Repository descriptor populated with its per-file ingest list."""
+
+
+class SearchRequest(BaseModel):
+    """Payload for `/api/search` (retrieval-only, no LLM call)."""
+
+    query: str = Field(min_length=1)
+    top_k: int | None = Field(default=None, ge=1, le=200)
+    document_ids: list[str] | None = None
+    repository_ids: list[str] | None = None
+    kinds: list[Literal["doc", "code"]] | None = None
+
+
+class SearchResponse(BaseModel):
+    """Response payload for `/api/search`."""
+
+    query: str
+    results: list[SearchHit]
+    total: int
+
+
 class ChatRequest(BaseModel):
     """Payload for /api/chat."""
 

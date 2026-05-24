@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .api import chat, documents, health, repository
+from .api import chat, documents, health, repository, search
 from .config import get_settings
 from .security import SecurityHeadersMiddleware, limiter
 
@@ -26,7 +26,30 @@ def create_app() -> FastAPI:
     @returns Fully wired FastAPI instance.
     """
     settings = get_settings()
-    application = FastAPI(title="GenericRagGenerator", version="0.1.0")
+    application = FastAPI(
+        title="GenericRagGenerator",
+        version="0.2.0",
+        summary="Local RAG service exposing a fully RESTful API over documents, repositories and chat.",
+        description=(
+            "Upload documents or whole repositories (code + docs), then retrieve "
+            "and chat against them. Every endpoint is consumable by browsers, "
+            "scripts and other services — the same surface is exposed whether "
+            "the app runs as a foreground process, a Windows service or inside "
+            "the bundled Docker compose stack. Interactive docs at `/docs` "
+            "(Swagger UI) and `/redoc`."
+        ),
+        contact={"name": "Jakub Syrek", "email": "jakubvonsyrek@gmail.com"},
+        openapi_tags=[
+            {"name": "health", "description": "Liveness + Ollama reachability probe."},
+            {
+                "name": "documents",
+                "description": "CRUD over individually uploaded documents and their chunks.",
+            },
+            {"name": "repositories", "description": "CRUD over uploaded ZIP repositories and their files."},
+            {"name": "search", "description": "Retrieval-only similarity search (no LLM call)."},
+            {"name": "chat", "description": "Streaming RAG answer (NDJSON), grounded in the index."},
+        ],
+    )
 
     application.state.limiter = limiter
     application.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
@@ -44,6 +67,7 @@ def create_app() -> FastAPI:
     application.include_router(health.router)
     application.include_router(documents.router)
     application.include_router(repository.router)
+    application.include_router(search.router)
     application.include_router(chat.router)
     _mount_frontend(application)
     return application

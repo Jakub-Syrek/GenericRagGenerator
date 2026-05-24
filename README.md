@@ -6,7 +6,7 @@
 [![YOUR DATA STAYS HERE](https://img.shields.io/badge/your%20data-stays%20on%20your%20box-7C3AED?style=for-the-badge&logo=lock&logoColor=white)](#)
 
 [![CI](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-40%20passed-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/tree/main/tests)
+[![tests](https://img.shields.io/badge/tests-47%20passed-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/tree/main/tests)
 [![eval](https://img.shields.io/badge/eval-24%2F24-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/blob/main/eval/sample-result.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -154,20 +154,49 @@ deployment guidance.
 
 ## API
 
-| Method | Path                       | Purpose                              |
-|--------|----------------------------|--------------------------------------|
-| GET    | `/api/health`              | Service + Ollama reachability        |
-| GET    | `/api/documents`           | List indexed documents               |
-| POST   | `/api/documents`           | Upload one document (multipart)      |
-| DELETE | `/api/documents/{id}`      | Remove a document and its chunks     |
-| GET    | `/api/repositories`        | List indexed repositories            |
-| POST   | `/api/repositories`        | Upload a project ZIP (multipart)     |
-| DELETE | `/api/repositories/{id}`   | Remove a repository and all its chunks |
-| POST   | `/api/chat`                | Stream a chat answer (NDJSON)        |
+Whatever run mode you pick (`run.ps1`, the Windows service, the Docker
+compose stack) the same REST surface is exposed on the same port — there
+is no "service" vs "API" mode; every install hosts the full API.
+Interactive OpenAPI docs live at `/docs` (Swagger UI) and `/redoc`.
 
-`/api/documents`, `/api/repositories` and `/api/chat` are gated behind an
-`X-API-Key` header when `API_KEY` is set; `/api/health` always stays
-unauthenticated for load balancers.
+| Method | Path                                    | Purpose                                              |
+|--------|-----------------------------------------|------------------------------------------------------|
+| GET    | `/api/health`                           | Service + Ollama reachability                        |
+| GET    | `/api/documents`                        | List indexed documents                               |
+| POST   | `/api/documents`                        | Upload one document (multipart)                      |
+| GET    | `/api/documents/{id}`                   | Document detail (kind, language, preview)            |
+| GET    | `/api/documents/{id}/chunks`            | List every chunk produced from a document            |
+| DELETE | `/api/documents/{id}`                   | Remove a document and its chunks                     |
+| GET    | `/api/repositories`                     | List indexed repositories                            |
+| POST   | `/api/repositories`                     | Upload a project ZIP (multipart)                     |
+| GET    | `/api/repositories/{id}`                | Repository detail with per-file ingest list          |
+| GET    | `/api/repositories/{id}/files`          | List every file ingested from a repository           |
+| DELETE | `/api/repositories/{id}`                | Remove a repository and all its chunks               |
+| POST   | `/api/search`                           | Retrieval-only similarity search (no LLM call)       |
+| POST   | `/api/chat`                             | Stream a chat answer (NDJSON)                        |
+
+`/api/documents`, `/api/repositories`, `/api/search` and `/api/chat` are
+gated behind an `X-API-Key` header when `API_KEY` is set; `/api/health`
+always stays unauthenticated for load balancers.
+
+### Search payload
+
+```json
+POST /api/search
+{
+  "query": "how does slugify work?",
+  "top_k": 10,
+  "document_ids": ["..."],
+  "repository_ids": ["..."],
+  "kinds": ["code", "doc"]
+}
+```
+
+Returns a `SearchResponse` with ranked chunks (`chunk_id`, `document_id`,
+`filename`, `kind`, `language`, optional `repository_*` and
+`line_start`/`line_end`, plus a `score` / `distance` pair). Useful as a
+debugging tool and as a building block for non-chat consumers (IDE
+plugins, autocomplete, batch jobs).
 
 The chat stream emits one JSON event per line:
 - `{"type": "sources", "sources": [...]}` once at the top, where each

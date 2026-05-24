@@ -148,6 +148,17 @@ class CodeChunker:
         return node
 
 
+def _optional_str(value: object) -> str | None:
+    """Coerce a metadata value to a non-empty string or `None`.
+
+    @param value Raw metadata value (typically str or None).
+    @returns The string form when truthy, `None` otherwise.
+    """
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
 class _PrefixedOllamaEmbedding(OllamaEmbedding):
     """`OllamaEmbedding` subclass that prepends asymmetric task prefixes.
 
@@ -284,6 +295,46 @@ class DocumentRecord:
     filename: str
     chunks: int
     uploaded_at: datetime
+
+
+@dataclass(frozen=True)
+class DocumentDetailRecord:
+    """`DocumentRecord` augmented with kind / language / preview metadata."""
+
+    id: str
+    filename: str
+    chunks: int
+    uploaded_at: datetime
+    kind: Kind
+    language: str
+    repository_id: str | None
+    repository_name: str | None
+    preview: str
+
+
+@dataclass(frozen=True)
+class ChunkRecord:
+    """One indexed chunk surfaced through the REST API."""
+
+    chunk_id: str
+    document_id: str
+    filename: str
+    kind: Kind
+    language: str
+    repository_id: str | None
+    repository_name: str | None
+    line_start: int | None
+    line_end: int | None
+    preview: str
+
+
+@dataclass(frozen=True)
+class ScoredChunkRecord:
+    """A `ChunkRecord` carrying a similarity score from the retriever."""
+
+    chunk: ChunkRecord
+    score: float
+    distance: float
 
 
 class RagService:
@@ -429,6 +480,218 @@ class RagService:
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete document {document_id}: {exc}") from exc
         return len(ids)
+
+    def get_document(self, document_id: str) -> DocumentDetailRecord | None:
+        """Return metadata + a content preview for one indexed document.
+
+        @param document_id Identifier of the document.
+        @returns `DocumentDetailRecord` or `None` when not found.
+        @raises VectorStoreError On Chroma failures.
+        """
+        rows = self._fetch_chunk_rows(where={"doc_id": document_id})
+        if not rows["ids"]:
+            return None
+        metadatas = rows["metadatas"] or []
+        documents = rows["documents"] or []
+        head_meta = metadatas[0]
+        return DocumentDetailRecord(
+            id=document_id,
+            filename=str(head_meta.get("filename", "")),
+            chunks=len(rows["ids"]),
+            uploaded_at=datetime.fromisoformat(str(head_meta.get("uploaded_at"))),
+            kind="code" if head_meta.get("kind") == "code" else "doc",
+            language=str(head_meta.get("language", "text")),
+            repository_id=_optional_str(head_meta.get("repository_id")),
+            repository_name=_optional_str(head_meta.get("repository_name")),
+            preview=str(documents[0])[:480] if documents else "",
+        )
+
+    def list_document_chunks(self, document_id: str) -> list[ChunkRecord]:
+        """Return every chunk of a document, ordered by their stored index.
+
+        @param document_id Identifier of the document.
+        @returns Ordered list of `ChunkRecord` (may be empty).
+        @raises VectorStoreError On Chroma failures.
+        """
+        rows = self._fetch_chunk_rows(where={"doc_id": document_id})
+        return [
+            self._row_to_chunk(chunk_id, metadata, document)
+            for chunk_id, metadata, document in zip(
+                rows["ids"], rows["metadatas"] or [], rows["documents"] or [], strict=False
+            )
+        ]
+
+    def get_repository(self, repository_id: str) -> RepositoryRecord | None:
+        """Return metadata + per-file ingest list for one indexed repository.
+
+        @param repository_id Identifier of the repository.
+        @returns `RepositoryRecord` or `None` when not found.
+        @raises VectorStoreError On Chroma failures.
+        """
+        rows = self._fetch_chunk_rows(where={"repository_id": repository_id})
+        if not rows["ids"]:
+            return None
+        files = self._aggregate_repository_files(rows)
+        head_meta = (rows["metadatas"] or [{}])[0]
+        return RepositoryRecord(
+            id=repository_id,
+            name=str(head_meta.get("repository_name", "")),
+            files=files,
+            skipped=[],
+            uploaded_at=datetime.fromisoformat(str(head_meta.get("uploaded_at"))),
+        )
+
+    def search(
+        self,
+        *,
+        query: str,
+        top_k: int | None = None,
+        document_ids: list[str] | None = None,
+        repository_ids: list[str] | None = None,
+        kinds: list[str] | None = None,
+    ) -> list[ScoredChunkRecord]:
+        """Run a similarity search and return ranked chunks (no LLM call).
+
+        @param query          Natural-language query.
+        @param top_k          Override for the configured top-k (clamped to 200).
+        @param document_ids   Optional document filter (AND'd with other filters).
+        @param repository_ids Optional repository filter (AND'd with other filters).
+        @param kinds          Optional kind filter (`code` / `doc`).
+        @returns Ranked list of `ScoredChunkRecord`.
+        @raises EmbeddingError On Ollama embedding failures.
+        """
+        limit = min(top_k or self._settings.top_k, 200)
+        filters = self._compose_search_filters(document_ids, repository_ids, kinds)
+        retriever = self._index.as_retriever(similarity_top_k=limit, filters=filters)
+        try:
+            nodes = retriever.retrieve(query)
+        except Exception as exc:
+            raise EmbeddingError(f"Search retrieval failed: {exc}") from exc
+        return [self._scored_chunk_from_node(node) for node in nodes]
+
+    def _fetch_chunk_rows(self, *, where: dict) -> dict:
+        """Read chunks from Chroma with metadata + raw text bodies.
+
+        @param where Chroma `where` clause restricting the rows returned.
+        @returns Dict with `ids`, `metadatas` and `documents` keys.
+        @raises VectorStoreError On Chroma failures.
+        """
+        try:
+            return self._collection.get(
+                where=where,
+                include=[IncludeEnum.metadatas, IncludeEnum.documents],
+            )
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to read chunks: {exc}") from exc
+
+    @staticmethod
+    def _row_to_chunk(chunk_id: str, metadata: dict, text: str) -> ChunkRecord:
+        """Lift a raw Chroma row into a `ChunkRecord`.
+
+        @param chunk_id Chroma row id.
+        @param metadata Chroma metadata dict.
+        @param text     Stored chunk text.
+        @returns Hydrated `ChunkRecord`.
+        """
+        kind: Kind = "code" if metadata.get("kind") == "code" else "doc"
+        line_start = metadata.get("line_start")
+        line_end = metadata.get("line_end")
+        return ChunkRecord(
+            chunk_id=chunk_id,
+            document_id=str(metadata.get("doc_id") or metadata.get("ref_doc_id") or ""),
+            filename=str(metadata.get("filename", "")),
+            kind=kind,
+            language=str(metadata.get("language", "text")),
+            repository_id=_optional_str(metadata.get("repository_id")),
+            repository_name=_optional_str(metadata.get("repository_name")),
+            line_start=int(line_start) if line_start is not None else None,
+            line_end=int(line_end) if line_end is not None else None,
+            preview=text[:480] if text else "",
+        )
+
+    @staticmethod
+    def _aggregate_repository_files(rows: dict) -> list[IngestedFile]:
+        """Group repository chunks by document_id to reconstruct the file list.
+
+        @param rows Output of `_fetch_chunk_rows` for one repository.
+        @returns List of `IngestedFile` in stable filename order.
+        """
+        grouped: dict[str, dict] = {}
+        for metadata in rows.get("metadatas") or []:
+            doc_id = str(metadata.get("doc_id") or metadata.get("ref_doc_id") or "")
+            if not doc_id:
+                continue
+            entry = grouped.setdefault(
+                doc_id,
+                {
+                    "filename": str(metadata.get("filename", "")),
+                    "kind": "code" if metadata.get("kind") == "code" else "doc",
+                    "language": str(metadata.get("language", "text")),
+                    "chunks": 0,
+                },
+            )
+            entry["chunks"] += 1
+        files = [
+            IngestedFile(
+                document_id=doc_id,
+                path=entry["filename"],
+                kind=entry["kind"],
+                language=entry["language"],
+                chunks=entry["chunks"],
+            )
+            for doc_id, entry in grouped.items()
+        ]
+        files.sort(key=lambda item: item.path)
+        return files
+
+    def _compose_search_filters(
+        self,
+        document_ids: list[str] | None,
+        repository_ids: list[str] | None,
+        kinds: list[str] | None,
+    ) -> MetadataFilters | None:
+        """Compose an AND'd `MetadataFilters` from optional scoping lists.
+
+        @param document_ids   Optional list of doc ids.
+        @param repository_ids Optional list of repository ids.
+        @param kinds          Optional list of kinds.
+        @returns Composite filter or `None` when no scoping is requested.
+        """
+        clauses: list[MetadataFilter] = []
+        if document_ids:
+            clauses.append(self._scalar_or_in("doc_id", document_ids))
+        if repository_ids:
+            clauses.append(self._scalar_or_in("repository_id", repository_ids))
+        if kinds:
+            clauses.append(self._scalar_or_in("kind", kinds))
+        return MetadataFilters(filters=clauses) if clauses else None
+
+    @staticmethod
+    def _scalar_or_in(key: str, values: list[str]) -> MetadataFilter:
+        """Build a single `MetadataFilter` using EQ / IN depending on cardinality.
+
+        @param key    Metadata field name.
+        @param values List of acceptable values (must be non-empty).
+        @returns Configured `MetadataFilter`.
+        """
+        if len(values) == 1:
+            return MetadataFilter(key=key, value=values[0], operator=FilterOperator.EQ)
+        return MetadataFilter(key=key, value=values, operator=FilterOperator.IN)
+
+    @staticmethod
+    def _scored_chunk_from_node(node: NodeWithScore) -> ScoredChunkRecord:
+        """Convert a retriever's `NodeWithScore` into a `ScoredChunkRecord`.
+
+        @param node Node returned by the LlamaIndex retriever.
+        @returns Hydrated scored chunk record.
+        """
+        metadata = node.metadata or {}
+        score = float(node.score if node.score is not None else 0.0)
+        return ScoredChunkRecord(
+            chunk=RagService._row_to_chunk(node.node_id, metadata, node.get_content() or ""),
+            score=score,
+            distance=float(1.0 - score),
+        )
 
     def ingest_repository(self, archive_name: str, payload: bytes) -> RepositoryRecord:
         """Open a ZIP archive and index every supported file inside.

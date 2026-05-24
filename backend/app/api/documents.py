@@ -5,10 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 
 from ..dependencies import get_rag_service
-from ..models.schemas import DocumentInfo, UploadResponse
+from ..models.schemas import ChunkInfo, DocumentDetail, DocumentInfo, UploadResponse
 from ..security import require_api_key
 from ..services.document_loader import UnsupportedFormatError
 from ..services.rag_service import (
+    ChunkRecord,
+    DocumentDetailRecord,
     EmbeddingError,
     EmptyDocumentError,
     RagService,
@@ -84,6 +86,42 @@ def list_documents(service: RagService = Depends(get_rag_service)) -> list[Docum
     ]
 
 
+@router.get("/{document_id}", response_model=DocumentDetail)
+def get_document(document_id: str, service: RagService = Depends(get_rag_service)) -> DocumentDetail:
+    """Return metadata + content preview for one indexed document.
+
+    @param document_id Document identifier.
+    @param service     Injected RAG service.
+    @returns Document detail payload.
+    @raises HTTPException When the document does not exist.
+    """
+    try:
+        record = service.get_document(document_id)
+    except VectorStoreError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
+    return _detail_to_schema(record)
+
+
+@router.get("/{document_id}/chunks", response_model=list[ChunkInfo])
+def list_chunks(document_id: str, service: RagService = Depends(get_rag_service)) -> list[ChunkInfo]:
+    """List every chunk produced from one document, ordered by their stored index.
+
+    @param document_id Document identifier.
+    @param service     Injected RAG service.
+    @returns Ordered list of chunk descriptors.
+    @raises HTTPException When the document does not exist.
+    """
+    try:
+        chunks = service.list_document_chunks(document_id)
+    except VectorStoreError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if not chunks:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
+    return [_chunk_to_schema(chunk) for chunk in chunks]
+
+
 @router.delete("/{document_id}")
 def delete_document(document_id: str, service: RagService = Depends(get_rag_service)) -> Response:
     """Remove every chunk belonging to one document.
@@ -100,3 +138,42 @@ def delete_document(document_id: str, service: RagService = Depends(get_rag_serv
     if removed == 0:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _detail_to_schema(record: DocumentDetailRecord) -> DocumentDetail:
+    """Lift a service-level detail record into the API schema.
+
+    @param record Service-level record.
+    @returns Pydantic `DocumentDetail` ready for serialization.
+    """
+    return DocumentDetail(
+        id=record.id,
+        filename=record.filename,
+        chunks=record.chunks,
+        uploaded_at=record.uploaded_at,
+        kind=record.kind,
+        language=record.language,
+        repository_id=record.repository_id,
+        repository_name=record.repository_name,
+        preview=record.preview,
+    )
+
+
+def _chunk_to_schema(chunk: ChunkRecord) -> ChunkInfo:
+    """Lift a service-level `ChunkRecord` into the API schema.
+
+    @param chunk Service-level chunk record.
+    @returns Pydantic `ChunkInfo` ready for serialization.
+    """
+    return ChunkInfo(
+        chunk_id=chunk.chunk_id,
+        document_id=chunk.document_id,
+        filename=chunk.filename,
+        kind=chunk.kind,
+        language=chunk.language,
+        repository_id=chunk.repository_id,
+        repository_name=chunk.repository_name,
+        line_start=chunk.line_start,
+        line_end=chunk.line_end,
+        preview=chunk.preview,
+    )
