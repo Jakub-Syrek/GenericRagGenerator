@@ -121,6 +121,9 @@ CORPUS: tuple[EvalDocument, ...] = (
                     "rag",
                     "image",
                     "machine learning",
+                    "object detection",
+                    "multi-modal",
+                    "semantic",
                 ),
                 expected_top_source="vector_database.txt",
             ),
@@ -222,5 +225,58 @@ REPOSITORY_QUESTIONS: tuple[EvalQuestion, ...] = (
         expected_any=("argparse",),
         expected_top_source="src/cli.py",
         expected_kind="code",
+    ),
+    EvalQuestion(
+        prompt=(
+            "Which two `str` methods does parse_sentence call on each character to "
+            "decide whether to keep it or replace it with whitespace?"
+        ),
+        expected_any=("isalnum", "isspace"),
+        expected_top_source="src/parser.py",
+        expected_kind="code",
+    ),
+    EvalQuestion(
+        prompt=("Which attribute of the parsed argparse namespace does cli.py pass to " "parse_sentence?"),
+        expected_any=("args.text", "text attribute", '"text"', "'text'"),
+        expected_top_source="src/cli.py",
+        expected_kind="code",
+    ),
+    EvalQuestion(
+        prompt=("How does slugify split its input into pieces before joining them " "with hyphens?"),
+        expected_any=("split", "whitespace"),
+        expected_top_source="src/utils/strings.py",
+        expected_kind="code",
+    ),
+    EvalQuestion(
+        prompt="According to the README, what does the mini_parser project exist as?",
+        expected_any=(
+            "example project",
+            "end-to-end testing",
+            "paired with",
+            "documentation",
+        ),
+        expected_top_source="README.md",
+        expected_kind="doc",
+    ),
+    EvalQuestion(
+        prompt=(
+            "According to the architecture document, in which direction does data "
+            "flow through the three layers?"
+        ),
+        expected_any=("linearly", "from the cli", "no cycles", "no side effects"),
+        expected_top_source="docs/architecture.html",
+        expected_kind="doc",
+    ),
+    EvalQuestion(
+        prompt="From which module does the mini_parser CLI import the slugify helper?",
+        expected_any=("utils.strings", "utils/strings", ".utils.strings"),
+        expected_top_source="src/cli.py",
+        expected_kind="code",
+    ),
+    EvalQuestion(
+        prompt="Does the mini_parser project document any retry behaviour on network failures?",
+        expected_any=(),
+        expected_top_source=None,
+        ooc=True,
     ),
 )
