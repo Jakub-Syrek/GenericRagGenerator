@@ -20,6 +20,7 @@ class UploadResponse(BaseModel):
 
     document: DocumentInfo
     message: str = "Document indexed successfully."
+    deduplicated: bool = False
 
 
 class ChatMessage(BaseModel):

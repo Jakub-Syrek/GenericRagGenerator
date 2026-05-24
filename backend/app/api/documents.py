@@ -52,7 +52,7 @@ async def upload_document(
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File exceeds 25 MB limit.")
 
     try:
-        info = service.ingest(file.filename, payload)
+        info, deduplicated = service.ingest(file.filename, payload)
     except UnsupportedFormatError as exc:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(exc)) from exc
     except EmptyDocumentError as exc:
@@ -61,7 +61,12 @@ async def upload_document(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     except StorageError as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
-    return UploadResponse(document=info)
+    message = (
+        "Document already indexed; returning existing record."
+        if deduplicated
+        else "Document indexed successfully."
+    )
+    return UploadResponse(document=info, message=message, deduplicated=deduplicated)
 
 
 @router.get("", response_model=list[DocumentInfo])

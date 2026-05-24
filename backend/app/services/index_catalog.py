@@ -199,6 +199,38 @@ class IndexCatalog:
         """
         return self._delete_where({"repository_id": repository_id})
 
+    def find_document_by_content_hash(self, content_hash: str) -> DocumentSummary | None:
+        """Return the existing document with the given `content_hash`, if any.
+
+        Used by the ingest path to skip re-embedding a payload that's
+        already been indexed. Returns the first match; uniqueness is
+        enforced at write time (we only store a hash when no doc with
+        it exists yet).
+
+        @param content_hash SHA-256 hex digest of the raw payload bytes.
+        @returns `DocumentSummary` of the prior upload, or `None`.
+        """
+        data = self._collection.get(
+            where={"content_hash": content_hash},
+            include=[IncludeEnum.metadatas],
+        )
+        metadatas = data.get("metadatas") or []
+        if not metadatas:
+            return None
+        head = metadatas[0]
+        doc_id = _doc_id(head)
+        if not doc_id:
+            return None
+        uploaded_at = head.get("uploaded_at")
+        if not uploaded_at:
+            return None
+        return DocumentSummary(
+            document_id=doc_id,
+            filename=str(head.get("filename", "")),
+            chunks=len(metadatas),
+            uploaded_at=datetime.fromisoformat(str(uploaded_at)),
+        )
+
     def all_chunks(self) -> list[ChunkRow]:
         """Return every chunk in the collection (metadata + body).
 

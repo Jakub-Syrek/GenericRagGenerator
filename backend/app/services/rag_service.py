@@ -8,6 +8,7 @@ level listing and deletion remain trivial.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
@@ -386,14 +387,32 @@ class RagService:
             storage_context=storage_context,
         )
 
-    def ingest(self, filename: str, payload: bytes) -> DocumentInfo:
+    def ingest(self, filename: str, payload: bytes) -> tuple[DocumentInfo, bool]:
         """Parse, chunk, embed and persist one uploaded file.
+
+        Computes a SHA-256 of the raw payload first. If a document with
+        the same hash already exists, returns the existing record with
+        `deduplicated=True` instead of re-embedding — keeps Ollama
+        traffic down on repeated uploads of the same file.
 
         @param filename Original file name (used for extension + metadata).
         @param payload  Raw bytes of the uploaded file.
-        @returns Metadata describing the freshly indexed document.
+        @returns Tuple of `(document_info, deduplicated)`.
         @raises EmptyDocumentError When the file yields no usable text.
         """
+        content_hash = hashlib.sha256(payload).hexdigest()
+        existing = self._catalog.find_document_by_content_hash(content_hash)
+        if existing is not None:
+            return (
+                DocumentInfo(
+                    id=existing.document_id,
+                    filename=existing.filename,
+                    chunks=existing.chunks,
+                    uploaded_at=existing.uploaded_at,
+                ),
+                True,
+            )
+
         loaded = self._loader.load(filename, payload)
         if not loaded.text:
             raise EmptyDocumentError("No text could be extracted from the file.")
@@ -408,9 +427,10 @@ class RagService:
                 "uploaded_at": uploaded_at.isoformat(),
                 "kind": loaded.kind,
                 "language": loaded.language,
+                "content_hash": content_hash,
             },
-            excluded_embed_metadata_keys=["uploaded_at", "kind", "language"],
-            excluded_llm_metadata_keys=["uploaded_at"],
+            excluded_embed_metadata_keys=["uploaded_at", "kind", "language", "content_hash"],
+            excluded_llm_metadata_keys=["uploaded_at", "content_hash"],
         )
         nodes = self._split_document(document)
         if not nodes:
@@ -427,11 +447,14 @@ class RagService:
         except OSError as exc:
             raise StorageError(f"Failed to archive raw upload: {exc}") from exc
 
-        return DocumentInfo(
-            id=document_id,
-            filename=filename,
-            chunks=len(nodes),
-            uploaded_at=uploaded_at,
+        return (
+            DocumentInfo(
+                id=document_id,
+                filename=filename,
+                chunks=len(nodes),
+                uploaded_at=uploaded_at,
+            ),
+            False,
         )
 
     def list_documents(self) -> list[DocumentRecord]:

@@ -36,17 +36,32 @@ class FakeRagService:
         self.list_failure: Exception | None = None
         self.delete_failure: Exception | None = None
         self.stream_failure: Exception | None = None
+        self._hashes: dict[str, str] = {}
 
-    def ingest(self, filename: str, payload: bytes) -> DocumentInfo:
+    def ingest(self, filename: str, payload: bytes) -> tuple[DocumentInfo, bool]:
         """Pretend to ingest a document and return canned metadata.
 
         @param filename File name supplied by the API.
-        @param payload  Raw file bytes (ignored here).
-        @returns Fake `DocumentInfo`.
+        @param payload  Raw file bytes (used for the dedup key).
+        @returns Tuple of `(DocumentInfo, deduplicated)`.
         @raises Exception When `ingest_failure` is configured.
         """
         if self.ingest_failure is not None:
             raise self.ingest_failure
+        import hashlib as _hashlib
+
+        content_hash = _hashlib.sha256(payload).hexdigest()
+        if content_hash in self._hashes:
+            existing = self.records[self._hashes[content_hash]]
+            return (
+                DocumentInfo(
+                    id=existing.id,
+                    filename=existing.filename,
+                    chunks=existing.chunks,
+                    uploaded_at=existing.uploaded_at,
+                ),
+                True,
+            )
         document_id = f"doc-{len(self.records) + 1}"
         record = DocumentRecord(
             id=document_id,
@@ -55,11 +70,15 @@ class FakeRagService:
             uploaded_at=datetime.now(UTC),
         )
         self.records[document_id] = record
-        return DocumentInfo(
-            id=record.id,
-            filename=record.filename,
-            chunks=record.chunks,
-            uploaded_at=record.uploaded_at,
+        self._hashes[content_hash] = document_id
+        return (
+            DocumentInfo(
+                id=record.id,
+                filename=record.filename,
+                chunks=record.chunks,
+                uploaded_at=record.uploaded_at,
+            ),
+            False,
         )
 
     def list_documents(self) -> list[DocumentRecord]:
@@ -185,6 +204,25 @@ def test_upload_then_list(client: TestClient, fake_service: FakeRagService) -> N
     listing = client.get("/api/documents").json()
     assert len(listing) == 1
     assert listing[0]["filename"] == "notes.txt"
+
+
+def test_upload_same_payload_twice_is_deduplicated(client: TestClient, fake_service: FakeRagService) -> None:
+    """Re-uploading the same bytes returns the prior record with `deduplicated=True`."""
+    payload = b"identical bytes" * 32
+    first = client.post(
+        "/api/documents",
+        files={"file": ("notes.txt", payload, "text/plain")},
+    ).json()
+    assert first["deduplicated"] is False
+    assert len(fake_service.records) == 1
+
+    second = client.post(
+        "/api/documents",
+        files={"file": ("renamed.txt", payload, "text/plain")},
+    ).json()
+    assert second["deduplicated"] is True
+    assert second["document"]["id"] == first["document"]["id"]
+    assert len(fake_service.records) == 1
 
 
 def test_upload_rejects_unsupported_format(client: TestClient, fake_service: FakeRagService) -> None:
