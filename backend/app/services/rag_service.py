@@ -54,6 +54,22 @@ class EmptyDocumentError(ValueError):
     """Raised when an uploaded document yields no extractable text."""
 
 
+class EmbeddingError(RuntimeError):
+    """Raised when Ollama embedding generation or retrieval fails."""
+
+
+class ChatGenerationError(RuntimeError):
+    """Raised when Ollama chat generation fails."""
+
+
+class VectorStoreError(RuntimeError):
+    """Raised when a ChromaDB operation fails."""
+
+
+class StorageError(OSError):
+    """Raised when persisting raw uploads to disk fails."""
+
+
 @dataclass(frozen=True)
 class DocumentRecord:
     """High-level document descriptor reconstructed from chunk metadata."""
@@ -77,8 +93,11 @@ class RagService:
         self._loader = loader
         self._upload_dir = settings.upload_dir
 
-        self._chroma_client = chromadb.PersistentClient(path=str(settings.chroma_dir))
-        self._collection = self._chroma_client.get_or_create_collection(COLLECTION_NAME)
+        try:
+            self._chroma_client = chromadb.PersistentClient(path=str(settings.chroma_dir))
+            self._collection = self._chroma_client.get_or_create_collection(COLLECTION_NAME)
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to open Chroma collection: {exc}") from exc
         vector_store = ChromaVectorStore(chroma_collection=self._collection)
 
         self._embed_model = OllamaEmbedding(
@@ -130,8 +149,16 @@ class RagService:
         if not nodes:
             raise EmptyDocumentError("Document produced no usable chunks.")
 
-        self._index.insert_nodes(nodes)
-        self._persist_raw(document_id, filename, payload)
+        try:
+            self._index.insert_nodes(nodes)
+        except Exception as exc:
+            raise EmbeddingError(f"Failed to embed and store chunks: {exc}") from exc
+
+        try:
+            self._persist_raw(document_id, filename, payload)
+        except OSError as exc:
+            raise StorageError(f"Failed to archive raw upload: {exc}") from exc
+
         return DocumentInfo(
             id=document_id,
             filename=filename,
@@ -144,7 +171,10 @@ class RagService:
 
         @returns Document records sorted by upload time (newest first).
         """
-        data = self._collection.get(include=[IncludeEnum.metadatas])
+        try:
+            data = self._collection.get(include=[IncludeEnum.metadatas])
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to list documents: {exc}") from exc
         grouped: dict[str, dict] = {}
         for metadata in data.get("metadatas", []) or []:
             doc_id = metadata.get("doc_id") or metadata.get("ref_doc_id")
@@ -178,11 +208,14 @@ class RagService:
         @param document_id Identifier of the document to remove.
         @returns Number of chunks deleted.
         """
-        existing = self._collection.get(where={"doc_id": document_id}, include=[])
-        ids = existing.get("ids", []) or []
-        if not ids:
-            return 0
-        self._collection.delete(ids=ids)
+        try:
+            existing = self._collection.get(where={"doc_id": document_id}, include=[])
+            ids = existing.get("ids", []) or []
+            if not ids:
+                return 0
+            self._collection.delete(ids=ids)
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to delete document {document_id}: {exc}") from exc
         return len(ids)
 
     async def stream_chat(
@@ -206,11 +239,14 @@ class RagService:
         yield {"type": "sources", "sources": [self._source(node) for node in nodes]}
 
         chat_messages = self._build_prompt(messages, nodes)
-        response = await self._llm.astream_chat(chat_messages)
-        async for chunk in response:
-            delta = getattr(chunk, "delta", "") or ""
-            if delta:
-                yield {"type": "delta", "content": delta}
+        try:
+            response = await self._llm.astream_chat(chat_messages)
+            async for chunk in response:
+                delta = getattr(chunk, "delta", "") or ""
+                if delta:
+                    yield {"type": "delta", "content": delta}
+        except Exception as exc:
+            raise ChatGenerationError(f"Chat generation failed: {exc}") from exc
         yield {"type": "done"}
 
     async def _retrieve(
@@ -228,7 +264,10 @@ class RagService:
             similarity_top_k=self._settings.top_k,
             filters=self._build_filters(document_ids),
         )
-        return await retriever.aretrieve(question)
+        try:
+            return await retriever.aretrieve(question)
+        except Exception as exc:
+            raise EmbeddingError(f"Retrieval failed: {exc}") from exc
 
     @staticmethod
     def _build_filters(document_ids: list[str] | None) -> MetadataFilters | None:

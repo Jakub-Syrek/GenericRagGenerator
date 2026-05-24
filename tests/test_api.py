@@ -12,7 +12,13 @@ from app.dependencies import get_rag_service
 from app.main import app
 from app.models.schemas import DocumentInfo
 from app.services.document_loader import UnsupportedFormatError
-from app.services.rag_service import DocumentRecord, EmptyDocumentError
+from app.services.rag_service import (
+    DocumentRecord,
+    EmbeddingError,
+    EmptyDocumentError,
+    StorageError,
+    VectorStoreError,
+)
 
 
 class FakeRagService:
@@ -23,6 +29,9 @@ class FakeRagService:
         self.records: dict[str, DocumentRecord] = {}
         self.stream_payload: list[dict] = []
         self.ingest_failure: Exception | None = None
+        self.list_failure: Exception | None = None
+        self.delete_failure: Exception | None = None
+        self.stream_failure: Exception | None = None
 
     def ingest(self, filename: str, payload: bytes) -> DocumentInfo:
         """Pretend to ingest a document and return canned metadata.
@@ -51,10 +60,14 @@ class FakeRagService:
 
     def list_documents(self) -> list[DocumentRecord]:
         """Return the in-memory document records."""
+        if self.list_failure is not None:
+            raise self.list_failure
         return list(self.records.values())
 
     def delete(self, document_id: str) -> int:
         """Forget a document by id and report how many chunks were removed."""
+        if self.delete_failure is not None:
+            raise self.delete_failure
         record = self.records.pop(document_id, None)
         return record.chunks if record else 0
 
@@ -65,6 +78,8 @@ class FakeRagService:
         _ = messages, document_ids
         for event in self.stream_payload:
             yield event
+        if self.stream_failure is not None:
+            raise self.stream_failure
 
 
 @pytest.fixture
@@ -155,6 +170,66 @@ def test_chat_streams_ndjson(client: TestClient, fake_service: FakeRagService) -
     lines = [line for line in response.text.splitlines() if line.strip()]
     types = [eval_line(line)["type"] for line in lines]
     assert types == ["sources", "delta", "delta", "done"]
+
+
+def test_upload_returns_502_on_embedding_failure(client: TestClient, fake_service: FakeRagService) -> None:
+    """Ollama failures during ingest surface as 502 Bad Gateway."""
+    fake_service.ingest_failure = EmbeddingError("ollama unreachable")
+    response = client.post(
+        "/api/documents",
+        files={"file": ("x.txt", b"hello", "text/plain")},
+    )
+    assert response.status_code == 502
+
+
+def test_upload_returns_502_on_vector_store_failure(client: TestClient, fake_service: FakeRagService) -> None:
+    """Chroma failures during ingest surface as 502 Bad Gateway."""
+    fake_service.ingest_failure = VectorStoreError("chroma down")
+    response = client.post(
+        "/api/documents",
+        files={"file": ("x.txt", b"hello", "text/plain")},
+    )
+    assert response.status_code == 502
+
+
+def test_upload_returns_500_on_storage_failure(client: TestClient, fake_service: FakeRagService) -> None:
+    """Filesystem failures during ingest surface as 500 Internal Server Error."""
+    fake_service.ingest_failure = StorageError("disk full")
+    response = client.post(
+        "/api/documents",
+        files={"file": ("x.txt", b"hello", "text/plain")},
+    )
+    assert response.status_code == 500
+
+
+def test_list_returns_502_on_vector_store_failure(client: TestClient, fake_service: FakeRagService) -> None:
+    """Chroma failures while listing surface as 502 Bad Gateway."""
+    fake_service.list_failure = VectorStoreError("chroma down")
+    response = client.get("/api/documents")
+    assert response.status_code == 502
+
+
+def test_delete_returns_502_on_vector_store_failure(client: TestClient, fake_service: FakeRagService) -> None:
+    """Chroma failures while deleting surface as 502 Bad Gateway."""
+    fake_service.delete_failure = VectorStoreError("chroma down")
+    response = client.delete("/api/documents/any-id")
+    assert response.status_code == 502
+
+
+def test_chat_emits_error_event_on_embedding_failure(
+    client: TestClient, fake_service: FakeRagService
+) -> None:
+    """Errors raised mid-stream are reported as a final `error` event, not HTTP 500."""
+    fake_service.stream_payload = [{"type": "sources", "sources": []}]
+    fake_service.stream_failure = EmbeddingError("retrieval boom")
+    response = client.post(
+        "/api/chat",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+    events = [eval_line(line) for line in response.text.splitlines() if line.strip()]
+    assert events[-1]["type"] == "error"
+    assert "retrieval boom" in events[-1]["message"]
 
 
 def eval_line(line: str) -> dict:

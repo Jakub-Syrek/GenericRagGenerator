@@ -10,7 +10,12 @@ from fastapi.responses import StreamingResponse
 
 from ..dependencies import get_rag_service
 from ..models.schemas import ChatRequest
-from ..services.rag_service import RagService
+from ..services.rag_service import (
+    ChatGenerationError,
+    EmbeddingError,
+    RagService,
+    VectorStoreError,
+)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -41,7 +46,7 @@ async def chat(
         try:
             async for event in stream:
                 yield (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
-        except Exception as exc:
+        except (EmbeddingError, ChatGenerationError, VectorStoreError) as exc:
             yield (json.dumps({"type": "error", "message": str(exc)}) + "\n").encode("utf-8")
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")

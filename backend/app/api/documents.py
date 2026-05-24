@@ -7,7 +7,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFil
 from ..dependencies import get_rag_service
 from ..models.schemas import DocumentInfo, UploadResponse
 from ..services.document_loader import UnsupportedFormatError
-from ..services.rag_service import EmptyDocumentError, RagService
+from ..services.rag_service import (
+    EmbeddingError,
+    EmptyDocumentError,
+    RagService,
+    StorageError,
+    VectorStoreError,
+)
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -38,8 +44,10 @@ async def upload_document(
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(exc)) from exc
     except EmptyDocumentError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Indexing failed: {exc}") from exc
+    except (EmbeddingError, VectorStoreError) as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
     return UploadResponse(document=info)
 
 
@@ -50,6 +58,10 @@ def list_documents(service: RagService = Depends(get_rag_service)) -> list[Docum
     @param service Injected RAG service.
     @returns Documents sorted from newest to oldest.
     """
+    try:
+        records = service.list_documents()
+    except VectorStoreError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return [
         DocumentInfo(
             id=record.id,
@@ -57,7 +69,7 @@ def list_documents(service: RagService = Depends(get_rag_service)) -> list[Docum
             chunks=record.chunks,
             uploaded_at=record.uploaded_at,
         )
-        for record in service.list_documents()
+        for record in records
     ]
 
 
@@ -70,7 +82,10 @@ def delete_document(document_id: str, service: RagService = Depends(get_rag_serv
     @returns 204 No Content on success.
     @raises HTTPException When the document does not exist.
     """
-    removed = service.delete(document_id)
+    try:
+        removed = service.delete(document_id)
+    except VectorStoreError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if removed == 0:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
