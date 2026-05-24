@@ -15,20 +15,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import chromadb
-from chromadb.api.types import IncludeEnum
 from llama_index.core import Document, StorageContext, VectorStoreIndex
 from llama_index.core.llms import ChatMessage as LiChatMessage
 from llama_index.core.llms import MessageRole
-from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
-from llama_index.core.schema import (
-    BaseNode,
-    NodeRelationship,
-    NodeWithScore,
-    RelatedNodeInfo,
-    TextNode,
-)
+from llama_index.core.schema import BaseNode, NodeWithScore
 from llama_index.core.vector_stores import (
     FilterOperator,
     MetadataFilter,
@@ -41,7 +34,9 @@ from pydantic import Field
 
 from ..config import Settings
 from ..models.schemas import DocumentInfo
+from .chunking import ChunkerRegistry, CodeChunker, MarkdownChunker, SentenceChunker
 from .document_loader import DocumentLoader, Kind, UnsupportedFormatError
+from .index_catalog import IndexCatalog
 
 COLLECTION_NAME = "documents"
 
@@ -82,70 +77,6 @@ _ROLE_MAP: dict[str, MessageRole] = {
     "assistant": MessageRole.ASSISTANT,
     "system": MessageRole.SYSTEM,
 }
-
-
-class CodeChunker:
-    """Line-window splitter producing `TextNode`s with `line_start` / `line_end`.
-
-    Tree-sitter would give us syntax-aware chunks but adds native dependencies
-    that don't ship well into restricted corporate environments. A pure-Python
-    line window with explicit overlap is robust and good enough: it never cuts
-    across an empty line boundary mid-window, preserves indentation, and the
-    citation gains the exact line range every time.
-    """
-
-    def __init__(self, lines_per_chunk: int = 60, overlap_lines: int = 10) -> None:
-        """Configure the size of each window and the lines of overlap.
-
-        @param lines_per_chunk Maximum number of lines per chunk.
-        @param overlap_lines   Number of trailing lines repeated in the next chunk.
-        @raises ValueError When parameters are inconsistent.
-        """
-        if lines_per_chunk <= 0:
-            raise ValueError("lines_per_chunk must be positive")
-        if overlap_lines < 0 or overlap_lines >= lines_per_chunk:
-            raise ValueError("overlap_lines must be in [0, lines_per_chunk)")
-        self._lines_per_chunk = lines_per_chunk
-        self._overlap_lines = overlap_lines
-
-    def split(self, document: Document) -> list[TextNode]:
-        """Split a code document into overlapping line windows.
-
-        @param document Source LlamaIndex `Document`.
-        @returns Ordered list of `TextNode`s with line-range metadata.
-        """
-        lines = document.text.splitlines()
-        if not lines:
-            return []
-        step = self._lines_per_chunk - self._overlap_lines
-        starts = list(range(0, len(lines), step))
-        return [self._build_node(document, lines, start) for start in starts if start < len(lines)]
-
-    def _build_node(self, document: Document, lines: list[str], start: int) -> TextNode:
-        """Materialise one chunk node from a line window.
-
-        @param document Source document (for metadata + relationships).
-        @param lines    Source lines.
-        @param start    Zero-based index of the first line in this window.
-        @returns A `TextNode` carrying the windowed text and line metadata.
-        """
-        end = min(start + self._lines_per_chunk, len(lines))
-        metadata = dict(document.metadata)
-        metadata["line_start"] = start + 1
-        metadata["line_end"] = end
-        excluded_embed = [
-            *(document.excluded_embed_metadata_keys or []),
-            "line_start",
-            "line_end",
-        ]
-        node = TextNode(
-            text="\n".join(lines[start:end]),
-            metadata=metadata,
-            excluded_embed_metadata_keys=excluded_embed,
-            excluded_llm_metadata_keys=list(document.excluded_llm_metadata_keys or []),
-        )
-        node.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(node_id=document.id_)
-        return node
 
 
 def _optional_str(value: object) -> str | None:
@@ -355,6 +286,7 @@ class RagService:
             self._collection = self._chroma_client.get_or_create_collection(COLLECTION_NAME)
         except Exception as exc:
             raise VectorStoreError(f"Failed to open Chroma collection: {exc}") from exc
+        self._catalog = IndexCatalog(self._collection)
         vector_store = ChromaVectorStore(chroma_collection=self._collection)
 
         self._embed_model = _PrefixedOllamaEmbedding(
@@ -368,12 +300,13 @@ class RagService:
             base_url=settings.ollama_host,
             request_timeout=120.0,
         )
-        self._splitter = SentenceSplitter(
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
+        self._chunker_registry = (
+            ChunkerRegistry(
+                default=SentenceChunker(chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap)
+            )
+            .register_language("markdown", MarkdownChunker())
+            .register_kind("code", CodeChunker())
         )
-        self._markdown_parser = MarkdownNodeParser()
-        self._code_chunker = CodeChunker()
 
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
         self._index = VectorStoreIndex.from_vector_store(
@@ -435,35 +368,18 @@ class RagService:
         @returns Document records sorted by upload time (newest first).
         """
         try:
-            data = self._collection.get(include=[IncludeEnum.metadatas])
+            summaries = self._catalog.list_documents()
         except Exception as exc:
             raise VectorStoreError(f"Failed to list documents: {exc}") from exc
-        grouped: dict[str, dict] = {}
-        for metadata in data.get("metadatas", []) or []:
-            doc_id = metadata.get("doc_id") or metadata.get("ref_doc_id")
-            if not doc_id:
-                continue
-            entry = grouped.setdefault(
-                str(doc_id),
-                {
-                    "filename": metadata.get("filename", ""),
-                    "chunks": 0,
-                    "uploaded_at": metadata.get("uploaded_at"),
-                },
-            )
-            entry["chunks"] += 1
-        records = [
+        return [
             DocumentRecord(
-                id=doc_id,
-                filename=entry["filename"],
-                chunks=entry["chunks"],
-                uploaded_at=datetime.fromisoformat(entry["uploaded_at"]),
+                id=summary.document_id,
+                filename=summary.filename,
+                chunks=summary.chunks,
+                uploaded_at=summary.uploaded_at,
             )
-            for doc_id, entry in grouped.items()
-            if entry.get("uploaded_at")
+            for summary in summaries
         ]
-        records.sort(key=lambda record: record.uploaded_at, reverse=True)
-        return records
 
     def delete(self, document_id: str) -> int:
         """Remove every chunk belonging to a document.
@@ -472,14 +388,9 @@ class RagService:
         @returns Number of chunks deleted.
         """
         try:
-            existing = self._collection.get(where={"doc_id": document_id}, include=[])
-            ids = existing.get("ids", []) or []
-            if not ids:
-                return 0
-            self._collection.delete(ids=ids)
+            return self._catalog.delete_document(document_id)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete document {document_id}: {exc}") from exc
-        return len(ids)
 
     def get_document(self, document_id: str) -> DocumentDetailRecord | None:
         """Return metadata + a content preview for one indexed document.
@@ -488,22 +399,23 @@ class RagService:
         @returns `DocumentDetailRecord` or `None` when not found.
         @raises VectorStoreError On Chroma failures.
         """
-        rows = self._fetch_chunk_rows(where={"doc_id": document_id})
-        if not rows["ids"]:
+        try:
+            rows = self._catalog.list_document_chunks(document_id)
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to read chunks: {exc}") from exc
+        if not rows:
             return None
-        metadatas = rows["metadatas"] or []
-        documents = rows["documents"] or []
-        head_meta = metadatas[0]
+        head_meta = rows[0].metadata
         return DocumentDetailRecord(
             id=document_id,
             filename=str(head_meta.get("filename", "")),
-            chunks=len(rows["ids"]),
+            chunks=len(rows),
             uploaded_at=datetime.fromisoformat(str(head_meta.get("uploaded_at"))),
             kind="code" if head_meta.get("kind") == "code" else "doc",
             language=str(head_meta.get("language", "text")),
             repository_id=_optional_str(head_meta.get("repository_id")),
             repository_name=_optional_str(head_meta.get("repository_name")),
-            preview=str(documents[0])[:480] if documents else "",
+            preview=rows[0].text[:480],
         )
 
     def list_document_chunks(self, document_id: str) -> list[ChunkRecord]:
@@ -513,13 +425,11 @@ class RagService:
         @returns Ordered list of `ChunkRecord` (may be empty).
         @raises VectorStoreError On Chroma failures.
         """
-        rows = self._fetch_chunk_rows(where={"doc_id": document_id})
-        return [
-            self._row_to_chunk(chunk_id, metadata, document)
-            for chunk_id, metadata, document in zip(
-                rows["ids"], rows["metadatas"] or [], rows["documents"] or [], strict=False
-            )
-        ]
+        try:
+            rows = self._catalog.list_document_chunks(document_id)
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to read chunks: {exc}") from exc
+        return [self._row_to_chunk(row.chunk_id, row.metadata, row.text) for row in rows]
 
     def get_repository(self, repository_id: str) -> RepositoryRecord | None:
         """Return metadata + per-file ingest list for one indexed repository.
@@ -528,11 +438,14 @@ class RagService:
         @returns `RepositoryRecord` or `None` when not found.
         @raises VectorStoreError On Chroma failures.
         """
-        rows = self._fetch_chunk_rows(where={"repository_id": repository_id})
-        if not rows["ids"]:
+        try:
+            rows = self._catalog.list_repository_chunks(repository_id)
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to read chunks: {exc}") from exc
+        if not rows:
             return None
-        files = self._aggregate_repository_files(rows)
-        head_meta = (rows["metadatas"] or [{}])[0]
+        files = self._aggregate_repository_files_from_rows(rows)
+        head_meta = rows[0].metadata
         return RepositoryRecord(
             id=repository_id,
             name=str(head_meta.get("repository_name", "")),
@@ -569,21 +482,6 @@ class RagService:
             raise EmbeddingError(f"Search retrieval failed: {exc}") from exc
         return [self._scored_chunk_from_node(node) for node in nodes]
 
-    def _fetch_chunk_rows(self, *, where: dict) -> dict:
-        """Read chunks from Chroma with metadata + raw text bodies.
-
-        @param where Chroma `where` clause restricting the rows returned.
-        @returns Dict with `ids`, `metadatas` and `documents` keys.
-        @raises VectorStoreError On Chroma failures.
-        """
-        try:
-            return self._collection.get(
-                where=where,
-                include=[IncludeEnum.metadatas, IncludeEnum.documents],
-            )
-        except Exception as exc:
-            raise VectorStoreError(f"Failed to read chunks: {exc}") from exc
-
     @staticmethod
     def _row_to_chunk(chunk_id: str, metadata: dict, text: str) -> ChunkRecord:
         """Lift a raw Chroma row into a `ChunkRecord`.
@@ -610,14 +508,17 @@ class RagService:
         )
 
     @staticmethod
-    def _aggregate_repository_files(rows: dict) -> list[IngestedFile]:
+    def _aggregate_repository_files_from_rows(
+        rows: list[Any],
+    ) -> list[IngestedFile]:
         """Group repository chunks by document_id to reconstruct the file list.
 
-        @param rows Output of `_fetch_chunk_rows` for one repository.
+        @param rows `ChunkRow` list returned by the catalog.
         @returns List of `IngestedFile` in stable filename order.
         """
         grouped: dict[str, dict] = {}
-        for metadata in rows.get("metadatas") or []:
+        for row in rows:
+            metadata = row.metadata
             doc_id = str(metadata.get("doc_id") or metadata.get("ref_doc_id") or "")
             if not doc_id:
                 continue
@@ -735,32 +636,16 @@ class RagService:
 
         @returns List of `(repository_id, repository_name, chunks, uploaded_at)`
                  sorted by upload time (newest first).
+        @raises VectorStoreError On Chroma failures.
         """
         try:
-            data = self._collection.get(include=[IncludeEnum.metadatas])
+            summaries = self._catalog.list_repositories()
         except Exception as exc:
             raise VectorStoreError(f"Failed to list repositories: {exc}") from exc
-        grouped: dict[str, dict] = {}
-        for metadata in data.get("metadatas", []) or []:
-            repo_id = metadata.get("repository_id")
-            if not repo_id:
-                continue
-            entry = grouped.setdefault(
-                str(repo_id),
-                {
-                    "name": metadata.get("repository_name", ""),
-                    "chunks": 0,
-                    "uploaded_at": metadata.get("uploaded_at"),
-                },
-            )
-            entry["chunks"] += 1
-        records = [
-            (repo_id, entry["name"], entry["chunks"], datetime.fromisoformat(entry["uploaded_at"]))
-            for repo_id, entry in grouped.items()
-            if entry.get("uploaded_at")
+        return [
+            (summary.repository_id, summary.name, summary.chunks, summary.uploaded_at)
+            for summary in summaries
         ]
-        records.sort(key=lambda item: item[3], reverse=True)
-        return records
 
     def delete_repository(self, repository_id: str) -> int:
         """Remove every chunk belonging to a repository.
@@ -770,14 +655,20 @@ class RagService:
         @raises VectorStoreError On Chroma failures.
         """
         try:
-            existing = self._collection.get(where={"repository_id": repository_id}, include=[])
-            ids = existing.get("ids", []) or []
-            if not ids:
-                return 0
-            self._collection.delete(ids=ids)
+            return self._catalog.delete_repository(repository_id)
         except Exception as exc:
             raise VectorStoreError(f"Failed to delete repository {repository_id}: {exc}") from exc
-        return len(ids)
+
+    def wipe(self) -> int:
+        """Remove every chunk in the index (administrative reset).
+
+        @returns Number of chunks removed.
+        @raises VectorStoreError On Chroma failures.
+        """
+        try:
+            return self._catalog.wipe()
+        except Exception as exc:
+            raise VectorStoreError(f"Failed to wipe index: {exc}") from exc
 
     @staticmethod
     def _open_zip(payload: bytes) -> zipfile.ZipFile:
@@ -1016,23 +907,12 @@ class RagService:
         )
 
     def _split_document(self, document: Document) -> list[BaseNode]:
-        """Pick the right chunking strategy for a document.
-
-        Code files go through `CodeChunker` (line windows with line-range
-        metadata). Markdown documents are header-split via LlamaIndex's
-        `MarkdownNodeParser` so each section becomes its own chunk. Everything
-        else (TXT, PDF, HTML, DOCX, RST) uses the default `SentenceSplitter`.
+        """Delegate to the chunker registry (Strategy + Registry).
 
         @param document Source `Document`.
         @returns List of nodes ready for embedding.
         """
-        kind = document.metadata.get("kind", "doc")
-        language = document.metadata.get("language", "")
-        if kind == "code":
-            return list(self._code_chunker.split(document))
-        if language == "markdown":
-            return list(self._markdown_parser.get_nodes_from_documents([document]))
-        return list(self._splitter.get_nodes_from_documents([document]))
+        return self._chunker_registry.split(document)
 
     def _embed_repository_documents(self, documents: list[Document]) -> list[IngestedFile]:
         """Split, embed and index a batch of repository documents.

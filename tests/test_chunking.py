@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 from llama_index.core import Document
 
-from app.services.rag_service import CodeChunker
+from app.services.chunking import (
+    ChunkerRegistry,
+    CodeChunker,
+    MarkdownChunker,
+    SentenceChunker,
+)
 
 
 def _make_python_document(lines: int) -> Document:
@@ -67,46 +72,52 @@ def test_code_chunker_empty_document_returns_no_nodes() -> None:
     assert chunker.split(document) == []
 
 
-def test_dispatcher_routes_code_through_line_chunker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RagService._split_document picks CodeChunker for `kind=code` documents."""
-    from app.services import rag_service as module
+def test_registry_routes_code_through_line_chunker() -> None:
+    """`ChunkerRegistry.pick` returns the code strategy for `kind=code` docs."""
 
-    class _StubMarkdown:
-        def get_nodes_from_documents(self, _docs: list) -> list:
-            raise AssertionError("markdown parser must not run on code docs")
+    class _Failing:
+        def split(self, _document: object) -> list:
+            raise AssertionError("non-code strategy must not run on code docs")
 
-    class _StubSentence:
-        def get_nodes_from_documents(self, _docs: list) -> list:
-            raise AssertionError("sentence splitter must not run on code docs")
-
-    service = module.RagService.__new__(module.RagService)
-    service._code_chunker = CodeChunker(lines_per_chunk=3, overlap_lines=1)
-    service._markdown_parser = _StubMarkdown()
-    service._splitter = _StubSentence()
-
+    registry = (
+        ChunkerRegistry(default=_Failing())
+        .register_language("markdown", _Failing())
+        .register_kind("code", CodeChunker(lines_per_chunk=3, overlap_lines=1))
+    )
     document = _make_python_document(10)
-    nodes = service._split_document(document)
+    nodes = registry.split(document)
     assert nodes
     assert all("line_start" in node.metadata for node in nodes)
 
 
-def test_dispatcher_routes_markdown_through_header_parser() -> None:
-    """`kind=doc, language=markdown` documents flow through MarkdownNodeParser."""
-    from app.services import rag_service as module
+def test_registry_routes_markdown_through_header_parser() -> None:
+    """`kind=doc, language=markdown` documents flow through `MarkdownChunker`."""
 
-    class _StubSentence:
-        def get_nodes_from_documents(self, _docs: list) -> list:
-            raise AssertionError("sentence splitter must not run on markdown docs")
+    class _Failing:
+        def split(self, _document: object) -> list:
+            raise AssertionError("default strategy must not run on markdown docs")
 
-    service = module.RagService.__new__(module.RagService)
-    service._code_chunker = CodeChunker()
-    service._markdown_parser = module.MarkdownNodeParser()
-    service._splitter = _StubSentence()
-
+    registry = (
+        ChunkerRegistry(default=_Failing())
+        .register_language("markdown", MarkdownChunker())
+        .register_kind("code", _Failing())
+    )
     document = Document(
         id_="doc-md",
         text="# Title\n\nIntro.\n\n## Section A\n\nAlpha body.\n\n## Section B\n\nBeta body.",
         metadata={"filename": "README.md", "kind": "doc", "language": "markdown"},
     )
-    nodes = service._split_document(document)
+    nodes = registry.split(document)
     assert len(nodes) >= 2
+
+
+def test_registry_falls_back_to_default() -> None:
+    """A document without a registered kind/language hits the default strategy."""
+    default = SentenceChunker(chunk_size=200, chunk_overlap=20)
+    registry = ChunkerRegistry(default=default)
+    document = Document(
+        id_="doc-txt",
+        text="Just some plain prose to split.",
+        metadata={"filename": "note.txt", "kind": "doc", "language": "text"},
+    )
+    assert registry.pick(document) is default

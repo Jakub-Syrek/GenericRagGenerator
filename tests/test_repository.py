@@ -45,11 +45,13 @@ def service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RagService:
     instance._collection = None
     instance._chroma_client = None
 
-    from app.services.rag_service import CodeChunker
+    from app.services.chunking import ChunkerRegistry, CodeChunker
 
-    class _SingleNodeSplitter:
-        def get_nodes_from_documents(self, documents: list) -> list:
-            return [{"document_id": doc.id_} for doc in documents]
+    class _StubChunker:
+        """One-node-per-doc strategy for the safety tests."""
+
+        def split(self, document: object) -> list:
+            return [{"document_id": getattr(document, "id_", "")}]
 
     class _NoopIndex:
         def __init__(self) -> None:
@@ -58,9 +60,14 @@ def service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RagService:
         def insert_nodes(self, nodes: list) -> None:
             self.inserted.extend(nodes)
 
-    instance._splitter = _SingleNodeSplitter()
-    instance._markdown_parser = _SingleNodeSplitter()
-    instance._code_chunker = CodeChunker(lines_per_chunk=100, overlap_lines=10)
+    instance._chunker_registry = (
+        ChunkerRegistry(default=_StubChunker())
+        .register_language("markdown", _StubChunker())
+        .register_kind("code", _StubChunker())
+    )
+    # CodeChunker is still re-exported from rag_service for back-compat with
+    # tests that import it; this assignment also keeps it imported.
+    _ = CodeChunker
     instance._index = _NoopIndex()
     return instance
 
