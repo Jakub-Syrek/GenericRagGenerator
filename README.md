@@ -1,6 +1,7 @@
 # GenericRagGenerator
 
 [![100% LOCAL](https://img.shields.io/badge/100%25-LOCAL-16a34a?style=for-the-badge&logoColor=white)](#)
+[![REST API](https://img.shields.io/badge/REST-API-0EA5E9?style=for-the-badge&logo=openapiinitiative&logoColor=white)](#rest-api)
 [![NO CLOUD](https://img.shields.io/badge/NO-CLOUD-DC2626?style=for-the-badge)](#)
 [![SELF-HOSTED](https://img.shields.io/badge/SELF--HOSTED-3B82F6?style=for-the-badge&logo=homeassistant&logoColor=white)](#)
 [![YOUR DATA STAYS HERE](https://img.shields.io/badge/your%20data-stays%20on%20your%20box-7C3AED?style=for-the-badge&logo=lock&logoColor=white)](#)
@@ -27,10 +28,18 @@
 > your box.** Run it on a laptop, a dev box, an air-gapped corporate
 > server — same code, same behaviour.
 
-Local Retrieval-Augmented Generation (RAG) service. Upload documents *or* a
-whole repository (code + docs), then chat with a local LLM that answers
-strictly from the indexed content and cites the exact file (with line range,
-for code).
+Local Retrieval-Augmented Generation (RAG) service exposed as a **fully
+RESTful HTTP API** (22 endpoints, OpenAPI / Swagger docs at `/docs`).
+Upload documents, a whole repository ZIP, or a multi-source project,
+then **query / chat / search** the index over the same surface from
+curl, Postman, an IDE plugin or the bundled browser UI. The exact same
+API is served whether you launch it as a foreground process
+(`run.ps1`), a Windows service (NSSM), or the Docker compose stack —
+no "service" vs "API" distinction, every install is a network-ready
+HTTP server.
+
+Answers are grounded strictly in the indexed content and cite the
+exact source file (with line range, for code).
 
 ## What it can ingest
 
