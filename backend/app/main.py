@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .api import chat, documents, health, repository
@@ -66,16 +67,17 @@ def _mount_frontend(application: FastAPI) -> None:
         return FileResponse(_FRONTEND_DIR / "index.html")
 
 
-def _rate_limit_handler(_request: object, exc: RateLimitExceeded) -> JSONResponse:
+def _rate_limit_handler(request: Request, exc: Exception) -> JSONResponse:
     """Render a JSON 429 with a `Retry-After` header.
 
-    @param _request Incoming request (unused).
-    @param exc      Rate-limit exception with the configured limit.
+    @param request Incoming request (unused, kept for Starlette's handler signature).
+    @param exc     Underlying exception; expected to be `RateLimitExceeded`.
     @returns Starlette JSON response.
     """
+    detail = exc.detail if isinstance(exc, RateLimitExceeded) else str(exc)
     return JSONResponse(
         status_code=429,
-        content={"detail": f"Rate limit exceeded: {exc.detail}"},
+        content={"detail": f"Rate limit exceeded: {detail}"},
         headers={"Retry-After": "60"},
     )
 
