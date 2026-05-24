@@ -1,5 +1,10 @@
 # GenericRagGenerator
 
+[![100% LOCAL](https://img.shields.io/badge/100%25-LOCAL-16a34a?style=for-the-badge&logoColor=white)](#)
+[![NO CLOUD](https://img.shields.io/badge/NO-CLOUD-DC2626?style=for-the-badge)](#)
+[![SELF-HOSTED](https://img.shields.io/badge/SELF--HOSTED-3B82F6?style=for-the-badge&logo=homeassistant&logoColor=white)](#)
+[![YOUR DATA STAYS HERE](https://img.shields.io/badge/your%20data-stays%20on%20your%20box-7C3AED?style=for-the-badge&logo=lock&logoColor=white)](#)
+
 [![CI](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml)
 [![tests](https://img.shields.io/badge/tests-40%20passed-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/tree/main/tests)
 [![eval](https://img.shields.io/badge/eval-24%2F24-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/blob/main/eval/sample-result.md)
@@ -15,6 +20,12 @@
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://pre-commit.com/)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
 [![Windows service](https://img.shields.io/badge/Windows%20service-NSSM-0078D4?logo=windows&logoColor=white)](scripts/install-windows-service.ps1)
+
+> **Runs entirely on your own machine.** The LLM (Ollama), the embedding
+> model, the vector store (ChromaDB) and the uploaded files all live on
+> your host. **No external API calls, no telemetry, no data ever leaves
+> your box.** Run it on a laptop, a dev box, an air-gapped corporate
+> server — same code, same behaviour.
 
 Local Retrieval-Augmented Generation (RAG) service. Upload documents *or* a
 whole repository (code + docs), then chat with a local LLM that answers
