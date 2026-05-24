@@ -6,7 +6,7 @@
 [![YOUR DATA STAYS HERE](https://img.shields.io/badge/your%20data-stays%20on%20your%20box-7C3AED?style=for-the-badge&logo=lock&logoColor=white)](#)
 
 [![CI](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jakub-Syrek/GenericRagGenerator/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-47%20passed-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/tree/main/tests)
+[![tests](https://img.shields.io/badge/tests-60%20passed-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/tree/main/tests)
 [![eval](https://img.shields.io/badge/eval-24%2F24-brightgreen)](https://github.com/Jakub-Syrek/GenericRagGenerator/blob/main/eval/sample-result.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -152,34 +152,80 @@ The compose stack runs both the app and Ollama with:
 See [`SECURITY.md`](SECURITY.md) for the full threat model and corp
 deployment guidance.
 
-## API
+## REST API
 
 Whatever run mode you pick (`run.ps1`, the Windows service, the Docker
-compose stack) the same REST surface is exposed on the same port — there
-is no "service" vs "API" mode; every install hosts the full API.
-Interactive OpenAPI docs live at `/docs` (Swagger UI) and `/redoc`.
+compose stack) the same surface is exposed on the same port — there is
+no "service" vs "API" distinction. Interactive OpenAPI docs live at
+`/docs` (Swagger UI) and `/redoc`; set `DOCS_ENABLED=false` to hide both
+plus `/openapi.json` in production.
 
-| Method | Path                                    | Purpose                                              |
-|--------|-----------------------------------------|------------------------------------------------------|
-| GET    | `/api/health`                           | Service + Ollama reachability                        |
-| GET    | `/api/documents`                        | List indexed documents                               |
-| POST   | `/api/documents`                        | Upload one document (multipart)                      |
-| GET    | `/api/documents/{id}`                   | Document detail (kind, language, preview)            |
-| GET    | `/api/documents/{id}/chunks`            | List every chunk produced from a document            |
-| DELETE | `/api/documents/{id}`                   | Remove a document and its chunks                     |
-| GET    | `/api/repositories`                     | List indexed repositories                            |
-| POST   | `/api/repositories`                     | Upload a project ZIP (multipart)                     |
-| GET    | `/api/repositories/{id}`                | Repository detail with per-file ingest list          |
-| GET    | `/api/repositories/{id}/files`          | List every file ingested from a repository           |
-| DELETE | `/api/repositories/{id}`                | Remove a repository and all its chunks               |
-| POST   | `/api/search`                           | Retrieval-only similarity search (no LLM call)       |
-| POST   | `/api/chat`                             | Stream a chat answer (NDJSON)                        |
+| Method | Path                                | Purpose                                                |
+|--------|-------------------------------------|--------------------------------------------------------|
+| GET    | `/api/health`                       | Service + Ollama reachability (always unauthenticated) |
+| POST   | `/api/auth/login`                   | Verify credentials, issue a JWT bearer                 |
+| GET    | `/api/auth/whoami`                  | Echo the authenticated principal + scopes              |
+| POST   | `/api/admin/reset`                  | Wipe every chunk in the index (admin scope only)       |
+| GET    | `/api/documents`                    | List indexed documents                                 |
+| POST   | `/api/documents`                    | Upload one document (multipart)                        |
+| GET    | `/api/documents/{id}`               | Document detail (kind, language, preview)              |
+| GET    | `/api/documents/{id}/chunks`        | List every chunk produced from a document              |
+| DELETE | `/api/documents/{id}`               | Remove a document and its chunks                       |
+| GET    | `/api/repositories`                 | List indexed repositories                              |
+| POST   | `/api/repositories`                 | Upload a project ZIP (multipart)                       |
+| GET    | `/api/repositories/{id}`            | Repository detail with per-file ingest list            |
+| GET    | `/api/repositories/{id}/files`      | List every file ingested from a repository             |
+| DELETE | `/api/repositories/{id}`            | Remove a repository and all its chunks                 |
+| GET    | `/api/projects`                     | List indexed multi-source projects                     |
+| POST   | `/api/projects`                     | Upload many raw files as one project (multipart)       |
+| GET    | `/api/projects/{id}`                | Project detail with per-file ingest list               |
+| GET    | `/api/projects/{id}/files`          | List every file ingested into a project                |
+| DELETE | `/api/projects/{id}`                | Remove a project and all its chunks                    |
+| POST   | `/api/search`                       | Retrieval-only similarity search (no LLM call)         |
+| POST   | `/api/query`                        | Synchronous RAG answer (one JSON, non-streaming)       |
+| POST   | `/api/chat`                         | Streaming RAG answer (NDJSON)                          |
 
-`/api/documents`, `/api/repositories`, `/api/search` and `/api/chat` are
-gated behind an `X-API-Key` header when `API_KEY` is set; `/api/health`
-always stays unauthenticated for load balancers.
+### Authentication
 
-### Search payload
+Two flows, accepted on every protected route:
+
+- **Static `X-API-Key`** — set `API_KEY` in the environment, then send
+  `X-API-Key: <secret>` on every request. Compared in constant time
+  (`hmac.compare_digest`); good for service-to-service.
+- **Interactive JWT bearer** — set `AUTH_PASSWORD` *and* `JWT_SECRET` in
+  the environment, then:
+  ```bash
+  TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":"…"}' | jq -r .access_token)
+  curl http://127.0.0.1:8000/api/auth/whoami -H "Authorization: Bearer $TOKEN"
+  ```
+  Bearer tokens are HS256-signed, carry a `sub` + `scopes` claim, and
+  expire after `JWT_EXPIRES_MINUTES` (default 60). The token from
+  `/api/auth/login` carries the `admin` scope, required by
+  `/api/admin/reset`.
+
+When neither `API_KEY` nor `JWT_SECRET` is configured, authentication
+is disabled and every endpoint runs as an `anonymous` principal — fine
+for local dev, never use in production.
+
+### Resource payloads
+
+```json
+POST /api/projects        // multipart
+files=<file>&files=<file>&name=<string>
+```
+
+```json
+POST /api/query
+{
+  "messages": [{"role": "user", "content": "How does slugify work?"}],
+  "document_ids":   ["..."],
+  "repository_ids": ["..."],
+  "project_ids":    ["..."]
+}
+// returns { "answer": "...", "sources": [...] }
+```
 
 ```json
 POST /api/search
@@ -190,13 +236,29 @@ POST /api/search
   "repository_ids": ["..."],
   "kinds": ["code", "doc"]
 }
+// returns { "query": "...", "results": [...], "total": N }
 ```
 
-Returns a `SearchResponse` with ranked chunks (`chunk_id`, `document_id`,
-`filename`, `kind`, `language`, optional `repository_*` and
-`line_start`/`line_end`, plus a `score` / `distance` pair). Useful as a
-debugging tool and as a building block for non-chat consumers (IDE
-plugins, autocomplete, batch jobs).
+```json
+POST /api/admin/reset    // Authorization: Bearer <admin-token>
+// returns { "chunks_removed": N }
+```
+
+## Architecture
+
+The codebase is intentionally SOLID-shaped and uses a handful of named
+design patterns where they buy something concrete:
+
+| Pattern                       | Where                                              |
+|-------------------------------|----------------------------------------------------|
+| **Strategy + Registry**       | `services/chunking.py` — `Chunker` protocol, `SentenceChunker`/`MarkdownChunker`/`CodeChunker`, `ChunkerRegistry` for `(kind, language) -> Chunker` resolution |
+| **Repository**                | `services/index_catalog.py` — `IndexCatalog` is the only class that imports `chromadb`; returns frozen domain dataclasses |
+| **Facade**                    | `services/rag_service.py` — `RagService` delegates to loader / chunker registry / catalog / LLM client; routes never see the pieces |
+| **Adapter**                   | `_PrefixedOllamaEmbedding` adapts `OllamaEmbedding` to nomic's asymmetric query/document prefixes |
+| **Specification / Value Object** | `security/auth.py` — `Principal` is the immutable identity for one request; `has_scope("admin")` reads as a specification |
+| **Chain of Responsibility**   | `require_credentials` tries API key first, then Bearer JWT, before failing closed |
+| **Decorator (middleware)**    | `SecurityHeadersMiddleware`, `SlowAPIMiddleware`, `CORSMiddleware` wrap every request without leaking into handler code |
+| **Dependency Injection**      | Pervasive via FastAPI `Depends`; cached singletons via `functools.lru_cache` providers in `dependencies.py` |
 
 The chat stream emits one JSON event per line:
 - `{"type": "sources", "sources": [...]}` once at the top, where each
@@ -211,12 +273,14 @@ The chat stream emits one JSON event per line:
 
 ```
 backend/app/
-  api/             HTTP routes (documents, repository, chat, health)
-  services/        RagService, DocumentLoader, CodeChunker
+  api/             HTTP routes (auth, admin, documents, repository,
+                   projects, search, query, chat, health)
+  services/        RagService (facade), chunking (Strategy/Registry),
+                   index_catalog (Repository), document_loader
   models/          Pydantic schemas
-  security.py      Headers middleware, API-key dependency, rate limiter
+  security/        Headers middleware, API-key + JWT auth, rate limiter
   config.py        Settings (env-driven)
-  dependencies.py  FastAPI DI providers
+  dependencies.py  FastAPI DI providers (cached singletons via lru_cache)
   main.py          FastAPI entry, middleware wiring, static frontend mount
 frontend/          Static UI (documents + repository forms, source chips)
 eval/              RAG quality eval (corpus + runner + sample report)
@@ -298,6 +362,11 @@ CI and live in `smoke_test.py` plus the `eval/` package.
 | `CORS_ORIGINS`              | `["http://localhost:8000", ...]` | Strict allowlist for browsers.                          |
 | `RATE_LIMIT_CHAT`           | `30/minute`                   | Per-IP slowapi limit on `/api/chat`.                        |
 | `RATE_LIMIT_UPLOADS`        | `10/minute`                   | Documented for reverse-proxy use (slowapi can't wrap `UploadFile`). |
+| `AUTH_USERNAME`             | `admin`                       | Username accepted by `POST /api/auth/login`.                |
+| `AUTH_PASSWORD`             | *(unset)*                     | Password accepted by login. Required to enable the bearer flow. |
+| `JWT_SECRET`                | *(unset)*                     | HS256 signing secret for issued JWT bearers. Required to enable login. |
+| `JWT_EXPIRES_MINUTES`       | `60`                          | Lifetime of issued bearer tokens.                           |
+| `DOCS_ENABLED`              | `true`                        | Set to `false` to hide `/docs`, `/redoc` and `/openapi.json` in prod. |
 
 ## Security
 
