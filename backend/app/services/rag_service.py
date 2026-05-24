@@ -46,6 +46,7 @@ from .document_loader import DocumentLoader, Kind, UnsupportedFormatError
 from .hybrid_retrieval import HybridRetriever
 from .index_catalog import IndexCatalog
 from .query_cache import QueryCache, make_key
+from .reranker import FlashRankReranker, NullReranker, RerankCandidate, Reranker
 
 COLLECTION_NAME = "documents"
 
@@ -337,6 +338,7 @@ class RagService:
             raise VectorStoreError(f"Failed to open Chroma collection: {exc}") from exc
         self._catalog = IndexCatalog(self._collection)
         self._hybrid = HybridRetriever(self._catalog)
+        self._reranker: Reranker = self._build_reranker(settings)
         self._search_cache: QueryCache[list[ScoredChunkRecord]] | None = (
             QueryCache(
                 max_entries=settings.cache_max_entries,
@@ -568,9 +570,51 @@ class RagService:
                 top_k=limit,
                 scope_predicate=self._scope_predicate(document_ids, repository_ids, kinds),
             )
+        scored = self._apply_reranker(query=query, scored=scored)
         if self._search_cache is not None:
             self._search_cache.put(cache_key, scored)
         return scored
+
+    @staticmethod
+    def _build_reranker(settings: Settings) -> Reranker:
+        """Pick the reranker implementation per settings.
+
+        @param settings Application settings.
+        @returns FlashRankReranker when enabled, NullReranker otherwise.
+        """
+        if not settings.reranker_enabled:
+            return NullReranker()
+        return FlashRankReranker(
+            model_name=settings.reranker_model,
+            cache_dir=str(settings.reranker_cache_dir) if settings.reranker_cache_dir else None,
+        )
+
+    def _apply_reranker(
+        self,
+        *,
+        query: str,
+        scored: list[ScoredChunkRecord],
+    ) -> list[ScoredChunkRecord]:
+        """Re-order `scored` with the configured cross-encoder reranker.
+
+        @param query  Original user query.
+        @param scored Shortlist from the vector (and optionally hybrid) pass.
+        @returns Reordered list, clipped to `reranker_top_k`.
+        """
+        if not scored or isinstance(self._reranker, NullReranker):
+            return scored
+        top_k = max(1, self._settings.reranker_top_k)
+        candidates = [
+            RerankCandidate(chunk_id=item.chunk.chunk_id, text=item.chunk.preview) for item in scored
+        ]
+        try:
+            ordered_ids = self._reranker.rerank(query=query, candidates=candidates, top_k=top_k)
+        except Exception:
+            # Reranker is best-effort: never regress retrieval if the ONNX
+            # model fails to load or the call times out.
+            return scored
+        by_id = {item.chunk.chunk_id: item for item in scored}
+        return [by_id[chunk_id] for chunk_id in ordered_ids if chunk_id in by_id]
 
     def _invalidate_retrieval_caches(self) -> None:
         """Drop both the BM25 corpus and the response cache after any write.

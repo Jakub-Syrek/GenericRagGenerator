@@ -79,6 +79,9 @@ def service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RagService:
     instance._hybrid = _StubHybrid()
     instance._search_cache = None
     instance._query_cache = None
+    from app.services.reranker import NullReranker
+
+    instance._reranker = NullReranker()
     return instance
 
 

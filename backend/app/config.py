@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     cache_max_entries: int = 256
     cache_ttl_seconds: int = 300
 
+    # Cross-encoder reranker run after retrieval. Opt-in: the default is
+    # NullReranker (pass-through). FlashRankReranker downloads a small
+    # ONNX model on first use (~80 MB, cached to `reranker_cache_dir`).
+    reranker_enabled: bool = False
+    reranker_model: str = "ms-marco-MiniLM-L-12-v2"
+    reranker_top_k: int = 5
+    reranker_cache_dir: Path | None = None
+
     app_host: str = "127.0.0.1"
     app_port: int = 8000
 
