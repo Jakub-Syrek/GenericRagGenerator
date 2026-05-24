@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import chat, documents, health
+from .api import chat, documents, health, repository
 from .config import get_settings
 
 _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
@@ -23,6 +23,7 @@ def create_app() -> FastAPI:
     application = FastAPI(title="GenericRagGenerator", version="0.1.0")
     application.include_router(health.router)
     application.include_router(documents.router)
+    application.include_router(repository.router)
     application.include_router(chat.router)
 
     if _FRONTEND_DIR.exists():

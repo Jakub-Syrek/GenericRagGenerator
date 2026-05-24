@@ -29,6 +29,42 @@ class ChatMessage(BaseModel):
     content: str = Field(min_length=1)
 
 
+class IngestedFileInfo(BaseModel):
+    """One source file successfully ingested from an uploaded repository."""
+
+    document_id: str
+    path: str
+    kind: Literal["doc", "code"]
+    language: str
+    chunks: int
+
+
+class SkippedFileInfo(BaseModel):
+    """One file skipped during repository ingest, with a reason."""
+
+    path: str
+    reason: str
+
+
+class RepositoryInfo(BaseModel):
+    """Aggregate description of an indexed repository archive."""
+
+    id: str
+    name: str
+    files_indexed: int
+    total_chunks: int
+    files: list[IngestedFileInfo]
+    skipped: list[SkippedFileInfo]
+    uploaded_at: datetime
+
+
+class RepositoryUploadResponse(BaseModel):
+    """Response payload returned after a successful repository ingest."""
+
+    repository: RepositoryInfo
+    message: str = "Repository indexed successfully."
+
+
 class ChatRequest(BaseModel):
     """Payload for /api/chat."""
 
