@@ -21,8 +21,14 @@ from chromadb.api.types import IncludeEnum
 from llama_index.core import Document, StorageContext, VectorStoreIndex
 from llama_index.core.llms import ChatMessage as LiChatMessage
 from llama_index.core.llms import MessageRole
-from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.schema import NodeWithScore
+from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
+from llama_index.core.schema import (
+    BaseNode,
+    NodeRelationship,
+    NodeWithScore,
+    RelatedNodeInfo,
+    TextNode,
+)
 from llama_index.core.vector_stores import (
     FilterOperator,
     MetadataFilter,
@@ -76,6 +82,70 @@ _ROLE_MAP: dict[str, MessageRole] = {
     "assistant": MessageRole.ASSISTANT,
     "system": MessageRole.SYSTEM,
 }
+
+
+class CodeChunker:
+    """Line-window splitter producing `TextNode`s with `line_start` / `line_end`.
+
+    Tree-sitter would give us syntax-aware chunks but adds native dependencies
+    that don't ship well into restricted corporate environments. A pure-Python
+    line window with explicit overlap is robust and good enough: it never cuts
+    across an empty line boundary mid-window, preserves indentation, and the
+    citation gains the exact line range every time.
+    """
+
+    def __init__(self, lines_per_chunk: int = 60, overlap_lines: int = 10) -> None:
+        """Configure the size of each window and the lines of overlap.
+
+        @param lines_per_chunk Maximum number of lines per chunk.
+        @param overlap_lines   Number of trailing lines repeated in the next chunk.
+        @raises ValueError When parameters are inconsistent.
+        """
+        if lines_per_chunk <= 0:
+            raise ValueError("lines_per_chunk must be positive")
+        if overlap_lines < 0 or overlap_lines >= lines_per_chunk:
+            raise ValueError("overlap_lines must be in [0, lines_per_chunk)")
+        self._lines_per_chunk = lines_per_chunk
+        self._overlap_lines = overlap_lines
+
+    def split(self, document: Document) -> list[TextNode]:
+        """Split a code document into overlapping line windows.
+
+        @param document Source LlamaIndex `Document`.
+        @returns Ordered list of `TextNode`s with line-range metadata.
+        """
+        lines = document.text.splitlines()
+        if not lines:
+            return []
+        step = self._lines_per_chunk - self._overlap_lines
+        starts = list(range(0, len(lines), step))
+        return [self._build_node(document, lines, start) for start in starts if start < len(lines)]
+
+    def _build_node(self, document: Document, lines: list[str], start: int) -> TextNode:
+        """Materialise one chunk node from a line window.
+
+        @param document Source document (for metadata + relationships).
+        @param lines    Source lines.
+        @param start    Zero-based index of the first line in this window.
+        @returns A `TextNode` carrying the windowed text and line metadata.
+        """
+        end = min(start + self._lines_per_chunk, len(lines))
+        metadata = dict(document.metadata)
+        metadata["line_start"] = start + 1
+        metadata["line_end"] = end
+        excluded_embed = [
+            *(document.excluded_embed_metadata_keys or []),
+            "line_start",
+            "line_end",
+        ]
+        node = TextNode(
+            text="\n".join(lines[start:end]),
+            metadata=metadata,
+            excluded_embed_metadata_keys=excluded_embed,
+            excluded_llm_metadata_keys=list(document.excluded_llm_metadata_keys or []),
+        )
+        node.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(node_id=document.id_)
+        return node
 
 
 class _PrefixedOllamaEmbedding(OllamaEmbedding):
@@ -251,6 +321,8 @@ class RagService:
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
         )
+        self._markdown_parser = MarkdownNodeParser()
+        self._code_chunker = CodeChunker()
 
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
         self._index = VectorStoreIndex.from_vector_store(
@@ -285,7 +357,7 @@ class RagService:
             excluded_embed_metadata_keys=["uploaded_at", "kind", "language"],
             excluded_llm_metadata_keys=["uploaded_at"],
         )
-        nodes = self._splitter.get_nodes_from_documents([document])
+        nodes = self._split_document(document)
         if not nodes:
             raise EmptyDocumentError("Document produced no usable chunks.")
 
@@ -680,6 +752,25 @@ class RagService:
             excluded_llm_metadata_keys=["uploaded_at", "repository_id"],
         )
 
+    def _split_document(self, document: Document) -> list[BaseNode]:
+        """Pick the right chunking strategy for a document.
+
+        Code files go through `CodeChunker` (line windows with line-range
+        metadata). Markdown documents are header-split via LlamaIndex's
+        `MarkdownNodeParser` so each section becomes its own chunk. Everything
+        else (TXT, PDF, HTML, DOCX, RST) uses the default `SentenceSplitter`.
+
+        @param document Source `Document`.
+        @returns List of nodes ready for embedding.
+        """
+        kind = document.metadata.get("kind", "doc")
+        language = document.metadata.get("language", "")
+        if kind == "code":
+            return list(self._code_chunker.split(document))
+        if language == "markdown":
+            return list(self._markdown_parser.get_nodes_from_documents([document]))
+        return list(self._splitter.get_nodes_from_documents([document]))
+
     def _embed_repository_documents(self, documents: list[Document]) -> list[IngestedFile]:
         """Split, embed and index a batch of repository documents.
 
@@ -690,7 +781,7 @@ class RagService:
         all_nodes: list = []
         files: list[IngestedFile] = []
         for document in documents:
-            nodes = self._splitter.get_nodes_from_documents([document])
+            nodes = self._split_document(document)
             kind_value = document.metadata.get("kind", "doc")
             kind: Kind = "code" if kind_value == "code" else "doc"
             files.append(

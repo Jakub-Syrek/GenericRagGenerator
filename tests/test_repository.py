@@ -45,7 +45,9 @@ def service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RagService:
     instance._collection = None
     instance._chroma_client = None
 
-    class _NoopSplitter:
+    from app.services.rag_service import CodeChunker
+
+    class _SingleNodeSplitter:
         def get_nodes_from_documents(self, documents: list) -> list:
             return [{"document_id": doc.id_} for doc in documents]
 
@@ -56,7 +58,9 @@ def service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> RagService:
         def insert_nodes(self, nodes: list) -> None:
             self.inserted.extend(nodes)
 
-    instance._splitter = _NoopSplitter()
+    instance._splitter = _SingleNodeSplitter()
+    instance._markdown_parser = _SingleNodeSplitter()
+    instance._code_chunker = CodeChunker(lines_per_chunk=100, overlap_lines=10)
     instance._index = _NoopIndex()
     return instance
 
